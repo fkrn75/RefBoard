@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RefBoard</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #1e1e1e; }
+      #app { position: fixed; inset: 0; }
+      /* 빈 캔버스 안내 (이미지가 들어오면 숨김) */
+      #hint {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        color: #777; font: 14px system-ui, sans-serif; pointer-events: none; user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hint">이미지를 이 창에 끌어다 놓으세요 &nbsp;·&nbsp; 휠 = 줌 &nbsp;·&nbsp; 우클릭 드래그 = 이동 &nbsp;·&nbsp; Ctrl+V = 붙여넣기</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
