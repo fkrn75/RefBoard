@@ -27,6 +27,7 @@ export interface BoardImage {
   crop?: Crop                  // 선택적 비파괴 크롭(없으면 원본 전체)
   opacity: number
   locked: boolean
+  groupId?: string             // 그룹 식별자(같은 값=한 그룹, 없으면 미그룹) — Phase 2.6 그룹
   z: number                    // 캔버스 내 레이어 순서
 }
 

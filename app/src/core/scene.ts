@@ -3,6 +3,7 @@ import { AnimatedGIF } from '@pixi/gif'
 import type { BoardImage } from './board'
 import type { GizmoHandle } from './gizmo'
 import { cropToFrame } from './crop'
+import type { GridLines } from './grid'
 
 // 화면 입력 1건을 "월드 좌표 + 적중 아이템"으로 정규화한 형태.
 export interface ScenePointer {
@@ -30,6 +31,7 @@ export class Scene {
   private selLayer = new Graphics() // 선택 외곽선
   private rubberLayer = new Graphics() // 러버밴드 사각형
   private gizmoLayer = new Graphics() // 변형 기즈모 핸들
+  private gridLayer = new Graphics() // 배경 그리드(최하단)
 
   // 입력 콜백 (main이 주입)
   onPointerDown?: (p: ScenePointer) => void
@@ -41,6 +43,11 @@ export class Scene {
     this.world = new Container()
     this.world.sortableChildren = true // zIndex로 레이어 순서 정렬
     this.app.stage.addChild(this.world)
+
+    // 배경 그리드: 최하단(이미지보다 아래), 포인터 통과
+    this.gridLayer.eventMode = 'none'
+    this.gridLayer.zIndex = -1_000_000
+    this.world.addChild(this.gridLayer)
 
     // 오버레이 레이어: 항상 최상단, 포인터 이벤트는 통과(none)
     for (const layer of [this.selLayer, this.rubberLayer, this.gizmoLayer]) {
@@ -213,14 +220,39 @@ export class Scene {
   }
 
   // ---- 오버레이 그리기 ----
-  drawSelection(ids: string[]) {
+  drawSelection(ids: string[], lockedIds?: Set<string>) {
     this.selLayer.clear()
     const lw = 2 / this.world.scale.x // 화면상 2px 유지(줌 보정)
     for (const id of ids) {
       const s = this.sprites.get(id)
       if (!s) continue
-      this.selLayer.poly(this.corners(s)).stroke({ width: lw, color: 0x4aa3ff })
+      // 잠긴 항목은 주황, 일반은 파랑으로 외곽선 색 구분
+      const color = lockedIds?.has(id) ? 0xff9800 : 0x4aa3ff
+      this.selLayer.poly(this.corners(s)).stroke({ width: lw, color })
     }
+  }
+
+  // 배경 그리드 그리기(월드 좌표 라인). null이면 끄기(clear).
+  // 라인 끝점은 현재 보이는 월드 영역으로 잡아 화면 전체를 가로지르게 한다.
+  // PixiJS v8 규약: stroke()는 직전 stroke/fill 이후 쌓인 path만 칠하므로 minor/major를 분리해 색을 달리한다.
+  drawGrid(lines: GridLines | null) {
+    this.gridLayer.clear()
+    if (!lines) return
+    const tl = this.screenToWorld(0, 0)
+    const br = this.screenToWorld(this.app.screen.width, this.app.screen.height)
+    const minX = Math.min(tl.x, br.x)
+    const maxX = Math.max(tl.x, br.x)
+    const minY = Math.min(tl.y, br.y)
+    const maxY = Math.max(tl.y, br.y)
+    const z = this.world.scale.x
+    // minor 라인(얇게)
+    for (const x of lines.verticals) this.gridLayer.moveTo(x, minY).lineTo(x, maxY)
+    for (const y of lines.horizontals) this.gridLayer.moveTo(minX, y).lineTo(maxX, y)
+    this.gridLayer.stroke({ width: 1 / z, color: 0x2c2c2c })
+    // major 라인(약간 굵고 밝게)
+    for (const x of lines.majorVerticals) this.gridLayer.moveTo(x, minY).lineTo(x, maxY)
+    for (const y of lines.majorHorizontals) this.gridLayer.moveTo(minX, y).lineTo(maxX, y)
+    this.gridLayer.stroke({ width: 1.5 / z, color: 0x3a3a3a })
   }
 
   // 변형 기즈모 핸들 그리기(단일 선택 시). 핸들 크기는 화면 고정(줌 보정).

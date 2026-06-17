@@ -10,6 +10,9 @@ import { bringToFront, sendToBack, bringForward, sendBackward, normalizeZ } from
 import { alignEdge, distribute, normalizeSize, type AlignItem } from './core/align'
 import { handlePositions, hitTest, scaleFromHandle, rotateFromPointer, type HandleId } from './core/gizmo'
 import { cropRectFromDrag } from './core/crop'
+import { expandByGroup, planGroup, planUngroup } from './core/group'
+import { visibleGrid } from './core/grid'
+import { OpacityControl } from './core/opacity-control'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -22,10 +25,11 @@ const sel = new Selection()
 const history = new History()
 let cam = { ...board.camera }
 
-// 선택이 바뀌면 선택 외곽선 + 기즈모 다시 그림
+// 선택이 바뀌면 선택 외곽선 + 기즈모 + 투명도 패널 다시 그림
 sel.onChange(() => {
-  scene.drawSelection(sel.values())
+  scene.drawSelection(sel.values(), lockedIdSet())
   refreshGizmo()
+  syncOpacityControl()
 })
 
 // ---- UI: 로딩 인디케이터 / 토스트 / 저장상태(dirty) ----
@@ -76,10 +80,50 @@ window.addEventListener('beforeunload', (e) => {
   e.returnValue = ''
 })
 
-// ---- 미니맵 / 스냅 ----
+// ---- 미니맵 / 스냅 / 그리드 / 투명도 ----
 const minimap = new Minimap(host)
 minimap.setVisible(false)
 let snapOn = false
+let gridOn = false
+
+// 잠긴 아이템 id 집합(선택 외곽선 색 구분용)
+function lockedIdSet(): Set<string> {
+  const s = new Set<string>()
+  for (const im of board.items) if (im.locked) s.add(im.id)
+  return s
+}
+
+// 투명도 슬라이더(우상단). 드래그=실시간 미리보기(첫 입력에 1회 commit), 놓으면 확정.
+const opacityCtl = new OpacityControl(host)
+let opacityCommitted = false
+opacityCtl.onInput = (v) => {
+  const ids = sel.values()
+  if (ids.length === 0) return
+  if (!opacityCommitted) {
+    commit() // 드래그 직전 상태를 1회만 히스토리에 적재(undo 1스텝)
+    opacityCommitted = true
+  }
+  for (const id of ids) {
+    const im = board.items.find((i) => i.id === id)
+    if (!im) continue
+    im.opacity = v
+    const s = scene.getSprite(id)
+    if (s) s.alpha = v
+  }
+}
+opacityCtl.onChange = () => {
+  opacityCommitted = false // 다음 드래그를 위해 리셋(값은 onInput이 이미 반영)
+}
+// 선택에 맞춰 투명도 패널 표시/숨김 + 대표값(첫 항목) 동기화
+function syncOpacityControl() {
+  const ids = sel.values()
+  if (ids.length === 0) {
+    opacityCtl.hide()
+    return
+  }
+  const im = board.items.find((i) => i.id === ids[0])
+  opacityCtl.show(im ? im.opacity : 1)
+}
 function updateMinimap() {
   minimap.update(scene.contentBounds(), cam, host.clientWidth, host.clientHeight)
 }
@@ -104,7 +148,7 @@ function refreshGizmo() {
 
 // 편집(이동/변형/정렬) 후 공통 갱신: 선택외곽선 + 기즈모 + 미니맵
 function afterEdit() {
-  scene.drawSelection(sel.values())
+  scene.drawSelection(sel.values(), lockedIdSet())
   refreshGizmo()
   updateMinimap()
 }
@@ -113,9 +157,10 @@ function afterEdit() {
 function applyCam() {
   scene.setCamera(cam.x, cam.y, cam.zoom)
   board.camera = { ...cam }
-  scene.drawSelection(sel.values()) // 줌 변화에 맞춰 외곽선 두께(줌 보정) 갱신
+  scene.drawSelection(sel.values(), lockedIdSet()) // 줌 변화에 맞춰 외곽선 두께(줌 보정) 갱신
   refreshGizmo() // 핸들 크기/오프셋도 줌 보정
   updateMinimap()
+  drawGridIfOn() // 그리드도 보이는 영역 기준 재계산
 }
 applyCam()
 
@@ -250,10 +295,10 @@ scene.onPointerDown = (p: ScenePointer) => {
       }
     }
   }
-  // 2) 이미지 선택 + 이동
+  // 2) 이미지 선택 + 이동 (그룹 멤버 클릭 시 그룹 통째 선택)
   if (p.hitId) {
     if (p.shift) sel.toggle(p.hitId)
-    else if (!sel.has(p.hitId)) sel.set([p.hitId])
+    else if (!sel.has(p.hitId)) sel.set(expandByGroup(board.items, [p.hitId]))
     const origins = new Map<string, { x: number; y: number }>()
     for (const id of sel.values()) {
       const img = board.items.find((i) => i.id === id)
@@ -380,8 +425,10 @@ scene.onPointerUp = (p: ScenePointer) => {
       const a = scene.getItemAABB(id)
       return a !== null && !(a.maxX < r.x || a.minX > r.x + r.w || a.maxY < r.y || a.minY > r.y + r.h)
     })
-    if (drag.additive) for (const id of hits) sel.add(id)
-    else sel.set(hits)
+    // 러버밴드에 걸린 항목을 그룹 단위로 확장
+    const expanded = expandByGroup(board.items, hits)
+    if (drag.additive) for (const id of expanded) sel.add(id)
+    else sel.set(expanded)
     scene.drawRubber(null)
   } else if (drag.mode === 'move') {
     host.style.cursor = ''
@@ -487,6 +534,62 @@ function flipSelected(axis: 'x' | 'y') {
     const s = scene.getSprite(id)
     if (s) scene.applyTransform(s, img)
   }
+}
+
+// ---- 그룹 (Phase 2.6) ----
+// 선택 2개 이상을 한 그룹으로 묶는다(같은 groupId 부여). 이후 멤버 클릭/러버밴드 시 그룹 통째 선택.
+function groupSelected() {
+  const plan = planGroup(board.items, sel.values())
+  if (!plan) {
+    showToast('그룹은 2개 이상 선택 시 가능합니다', true)
+    return
+  }
+  commit()
+  for (const id of plan.memberIds) {
+    const im = board.items.find((i) => i.id === id)
+    if (im) im.groupId = plan.groupId
+  }
+  showToast(`${plan.memberIds.length}개 그룹화`, true)
+}
+// 선택에 걸린 그룹(들)을 해제한다(groupId 제거).
+function ungroupSelected() {
+  const targets = planUngroup(board.items, sel.values())
+  if (targets.length === 0) {
+    showToast('해제할 그룹이 없습니다', true)
+    return
+  }
+  commit()
+  for (const id of targets) {
+    const im = board.items.find((i) => i.id === id)
+    if (im) delete im.groupId
+  }
+  showToast('그룹 해제', true)
+}
+
+// ---- 잠금 (Phase 2.7) ----
+// 선택 항목의 잠금을 토글한다. 하나라도 안 잠겼으면 전체 잠금, 모두 잠겼으면 전체 해제.
+// 잠긴 항목은 이동/기즈모 변형이 막히고(기존 로직), 외곽선이 주황으로 표시된다.
+function toggleLock() {
+  const ids = sel.values()
+  if (ids.length === 0) return
+  commit()
+  const anyUnlocked = ids.some((id) => {
+    const im = board.items.find((i) => i.id === id)
+    return im ? !im.locked : false
+  })
+  for (const id of ids) {
+    const im = board.items.find((i) => i.id === id)
+    if (im) im.locked = anyUnlocked
+  }
+  afterEdit()
+  showToast(anyUnlocked ? '잠금' : '잠금 해제', true)
+}
+
+// ---- 그리드 (Phase 2.8) ----
+// 그리드가 켜져 있으면 현재 카메라/뷰포트 기준으로 다시 계산해 그린다. 꺼져 있으면 지운다.
+function drawGridIfOn() {
+  if (gridOn) scene.drawGrid(visibleGrid(cam, { w: host.clientWidth, h: host.clientHeight }))
+  else scene.drawGrid(null)
 }
 
 // ---- 크롭 (Phase 2.2, 비파괴) ----
@@ -706,6 +809,12 @@ window.addEventListener('keydown', (e) => {
   } else if (ctrl && k === 'o') {
     e.preventDefault()
     void openBoard()
+  } else if (ctrl && e.shiftKey && k === 'g') {
+    e.preventDefault()
+    ungroupSelected()
+  } else if (ctrl && k === 'g') {
+    e.preventDefault()
+    groupSelected()
   } else if (ctrl && !e.shiftKey && k === 'z') {
     e.preventDefault()
     void doUndo()
@@ -742,6 +851,13 @@ window.addEventListener('keydown', (e) => {
   } else if (!ctrl && k === 'n') {
     snapOn = !snapOn
     showToast(snapOn ? '스냅 켜짐 · 그리드/이웃' : '스냅 꺼짐', true)
+  } else if (!ctrl && !e.altKey && k === 'g') {
+    gridOn = !gridOn
+    drawGridIfOn()
+    showToast(gridOn ? '그리드 켜짐' : '그리드 꺼짐', true)
+  } else if (e.altKey && e.code === 'KeyL') {
+    e.preventDefault()
+    toggleLock()
   } else if (e.altKey && e.shiftKey && e.code === 'KeyH') {
     e.preventDefault()
     flipSelected('x')
@@ -863,6 +979,10 @@ function imageSize(src: string): Promise<{ w: number; h: number }> {
   bringToFront: () => applyZOrder(bringToFront),
   sendToBack: () => applyZOrder(sendToBack),
   flip: flipSelected,
+  group: groupSelected,
+  ungroup: ungroupSelected,
+  toggleLock,
+  toggleGrid: () => ((gridOn = !gridOn), drawGridIfOn(), gridOn),
   crop: enterCropMode,
   resetCrop,
   resetTransform,
