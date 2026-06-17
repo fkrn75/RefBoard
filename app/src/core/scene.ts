@@ -4,6 +4,7 @@ import type { BoardImage } from './board'
 import type { GizmoHandle } from './gizmo'
 import { cropToFrame } from './crop'
 import type { GridLines } from './grid'
+import { getCanvasColors } from './theme'
 
 // 화면 입력 1건을 "월드 좌표 + 적중 아이템"으로 정규화한 형태.
 export interface ScenePointer {
@@ -80,7 +81,7 @@ export class Scene {
   static async create(host: HTMLElement): Promise<Scene> {
     const app = new Application()
     await app.init({
-      background: '#1e1e1e',
+      background: getCanvasColors().canvasBg,
       resizeTo: host,
       antialias: true,
       autoDensity: true,
@@ -222,12 +223,13 @@ export class Scene {
   // ---- 오버레이 그리기 ----
   drawSelection(ids: string[], lockedIds?: Set<string>) {
     this.selLayer.clear()
+    const c = getCanvasColors()
     const lw = 2 / this.world.scale.x // 화면상 2px 유지(줌 보정)
     for (const id of ids) {
       const s = this.sprites.get(id)
       if (!s) continue
-      // 잠긴 항목은 주황, 일반은 파랑으로 외곽선 색 구분
-      const color = lockedIds?.has(id) ? 0xff9800 : 0x4aa3ff
+      // 잠긴 항목은 주황(warn), 일반은 파랑(selection)으로 외곽선 색 구분(테마 연동)
+      const color = lockedIds?.has(id) ? c.warn : c.selection
       this.selLayer.poly(this.corners(s)).stroke({ width: lw, color })
     }
   }
@@ -245,14 +247,15 @@ export class Scene {
     const minY = Math.min(tl.y, br.y)
     const maxY = Math.max(tl.y, br.y)
     const z = this.world.scale.x
+    const c = getCanvasColors()
     // minor 라인(얇게)
     for (const x of lines.verticals) this.gridLayer.moveTo(x, minY).lineTo(x, maxY)
     for (const y of lines.horizontals) this.gridLayer.moveTo(minX, y).lineTo(maxX, y)
-    this.gridLayer.stroke({ width: 1 / z, color: 0x2c2c2c })
+    this.gridLayer.stroke({ width: 1 / z, color: c.grid })
     // major 라인(약간 굵고 밝게)
     for (const x of lines.majorVerticals) this.gridLayer.moveTo(x, minY).lineTo(x, maxY)
     for (const y of lines.majorHorizontals) this.gridLayer.moveTo(minX, y).lineTo(maxX, y)
-    this.gridLayer.stroke({ width: 1.5 / z, color: 0x3a3a3a })
+    this.gridLayer.stroke({ width: 1.5 / z, color: c.gridMajor })
   }
 
   // 변형 기즈모 핸들 그리기(단일 선택 시). 핸들 크기는 화면 고정(줌 보정).
@@ -260,13 +263,14 @@ export class Scene {
     this.gizmoLayer.clear()
     if (handles.length === 0) return
     const z = this.world.scale.x
+    const c = getCanvasColors()
     const r = 5 / z // 핸들 반경(화면 5px)
     const lw = 1.5 / z
     for (const h of handles) {
       if (h.id === 'rotate') {
-        this.gizmoLayer.circle(h.x, h.y, r).fill({ color: 0xffffff }).stroke({ width: lw, color: 0x4aa3ff })
+        this.gizmoLayer.circle(h.x, h.y, r).fill({ color: 0xffffff }).stroke({ width: lw, color: c.accent })
       } else {
-        this.gizmoLayer.rect(h.x - r, h.y - r, r * 2, r * 2).fill({ color: 0xffffff }).stroke({ width: lw, color: 0x4aa3ff })
+        this.gizmoLayer.rect(h.x - r, h.y - r, r * 2, r * 2).fill({ color: 0xffffff }).stroke({ width: lw, color: c.accent })
       }
     }
   }
@@ -274,11 +278,17 @@ export class Scene {
   drawRubber(rect: Rect | null) {
     this.rubberLayer.clear()
     if (!rect) return
+    const c = getCanvasColors()
     const lw = 1 / this.world.scale.x
     this.rubberLayer
       .rect(rect.x, rect.y, rect.w, rect.h)
-      .fill({ color: 0x4aa3ff, alpha: 0.12 })
-      .stroke({ width: lw, color: 0x4aa3ff })
+      .fill({ color: c.accent, alpha: 0.12 })
+      .stroke({ width: lw, color: c.accent })
+  }
+
+  // 테마 변경 시 캔버스 배경색을 갱신한다(그리드/선택 등 오버레이는 호출측이 다시 그린다).
+  refreshBackground() {
+    this.app.renderer.background.color = getCanvasColors().canvasBg
   }
 
   // 내보내기용: 오버레이(선택 외곽선/러버밴드/기즈모/그리드)를 잠시 숨기고 복원 함수를 반환한다.

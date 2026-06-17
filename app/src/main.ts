@@ -2,7 +2,7 @@ import { Scene, type ScenePointer, type Rect } from './core/scene'
 import { createEmptyBoard, genId, type BoardImage, type BoardState, type Transform } from './core/board'
 import { Selection } from './core/selection'
 import { packImages } from './core/pack'
-import { loadBoardFile, pickRefbFile } from './core/io'
+import { loadBoardFile, loadBoardBlob, pickRefbFile } from './core/io'
 import { History } from './core/history'
 import { Minimap } from './core/minimap'
 import { snapToNeighbors, snapDeltaToGrid, type AABB } from './core/snap'
@@ -17,6 +17,18 @@ import { packRefb } from './core/refb'
 import { exportSceneAll, exportSelection, renderThumbnail, downloadBlob } from './core/export-image'
 import { AutoSave } from './core/autosave'
 import { addRecent, setLastSession, getLastSession } from './core/recent'
+import { applyTheme, getTheme, onThemeChange } from './core/theme'
+import { registerActions, matchKey, getActions, DEFAULT_ACTIONS, type Action } from './core/keymap'
+import { openPalette, isPaletteOpen } from './core/command-palette'
+import { downscaleIfLarge } from './core/downscale'
+import {
+  isDesktop,
+  saveRefbNative,
+  openRefbNative,
+  setAlwaysOnTop,
+  setDecorations,
+  setClickThrough,
+} from './core/tauri-bridge'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -24,6 +36,8 @@ const hint = document.getElementById('hint') as HTMLElement
 
 // board는 undo/redo·열기로 통째 교체될 수 있어 let.
 let board: BoardState = createEmptyBoard()
+// 테마 부팅: 저장된 테마를 캔버스 생성 전에 적용해 배경/그리드 색이 처음부터 일치하게 한다.
+applyTheme(getTheme())
 const scene = await Scene.create(host)
 const sel = new Selection()
 const history = new History()
@@ -756,14 +770,29 @@ function openImageFiles() {
 }
 
 async function openBoard() {
-  const file = await pickRefbFile()
-  if (!file) return
   try {
-    const state = await loadBoardFile(file)
+    let state: BoardState
+    let fileName: string
+    let fileSize: number | undefined
+    if (isDesktop()) {
+      // 데스크탑: 네이티브 열기 다이얼로그 → 바이트 읽기.
+      const opened = await openRefbNative()
+      if (!opened) return // 취소
+      state = await loadBoardBlob(new Blob([opened.bytes as BlobPart]))
+      fileName = opened.name
+      fileSize = opened.bytes.byteLength
+    } else {
+      // 웹: <input type=file>로 선택.
+      const file = await pickRefbFile()
+      if (!file) return
+      state = await loadBoardFile(file)
+      fileName = file.name
+      fileSize = file.size
+    }
     history.push(board)
     await restore(state)
     // 최근 파일 등록 + 새 보드를 열었으니 이전 크래시 복구본 해제.
-    addRecent({ name: file.name, ts: Date.now(), size: file.size })
+    addRecent({ name: fileName, ts: Date.now(), size: fileSize })
     await autosave.clearRecovery()
     setDirty(false)
   } catch (err) {
@@ -796,16 +825,25 @@ async function save() {
   } catch {
     thumb = undefined // 썸네일 실패는 저장을 막지 않음
   }
-  // 보드를 .refb(ZIP 컨테이너)로 패킹해 다운로드.
+  // 보드를 .refb(ZIP 컨테이너)로 패킹.
   const blob = await packRefb(board, { thumbnail: thumb })
   const base = (board.board.title || '').trim().replace(/\s+/g, '_') || 'board'
   const name = base + '.refb'
-  downloadBlob(blob, name)
+  // 데스크탑(Tauri)이면 네이티브 저장 다이얼로그로 실제 경로에 기록, 웹이면 브라우저 다운로드.
+  let savedName = name
+  if (isDesktop()) {
+    const bytes = new Uint8Array(await blob.arrayBuffer())
+    const savedPath = await saveRefbNative(bytes, name)
+    if (!savedPath) return // 사용자가 저장 취소
+    savedName = savedPath.replace(/^.*[\\/]/, '')
+  } else {
+    downloadBlob(blob, name)
+  }
   // 최근 파일 등록 + 크래시 복구 스냅샷 해제(정상 저장 완료) + dirty 해제.
-  addRecent({ name, ts: Date.now(), size: blob.size })
+  addRecent({ name: savedName, ts: Date.now(), size: blob.size })
   await autosave.clearRecovery()
   setDirty(false)
-  showToast('저장됨 · ' + name, true)
+  showToast('저장됨 · ' + savedName, true)
 }
 
 // ---- 내보내기(Export): 씬/선택 → PNG ----
@@ -846,114 +884,141 @@ async function exportSel() {
   }
 }
 
+// ---- 키맵 + 테마 배선 ----
+// 데스크탑 전용 윈도우 모드 액션(웹에선 no-op + 안내 토스트). 기본 액션 뒤에 합쳐 등록.
+const WINDOW_ACTIONS: Action[] = [
+  { id: 'window.toggleAlwaysOnTop', label: '항상 위', group: '창', defaultCombo: 'Ctrl+Shift+A' },
+  { id: 'window.toggleDecorations', label: '타이틀바 숨김/표시', group: '창', defaultCombo: 'Ctrl+Shift+D' },
+  { id: 'window.toggleClickThrough', label: '마우스 통과(클릭스루)', group: '창', defaultCombo: 'Ctrl+Alt+T' },
+]
+// 단축키 액션 카탈로그 등록(저장된 사용자 재바인딩도 이때 함께 로드된다).
+registerActions([...DEFAULT_ACTIONS, ...WINDOW_ACTIONS])
+
+// ---- 윈도우 모드 토글(데스크탑 전용 · PureRef 정체성) ----
+let winAlwaysOnTop = false
+let winDecorations = true
+let winClickThrough = false
+async function toggleAlwaysOnTop() {
+  if (!isDesktop()) return showToast('데스크탑 앱에서만 사용할 수 있습니다', true)
+  winAlwaysOnTop = !winAlwaysOnTop
+  await setAlwaysOnTop(winAlwaysOnTop)
+  showToast(winAlwaysOnTop ? '항상 위 켜짐' : '항상 위 꺼짐', true)
+}
+async function toggleDecorations() {
+  if (!isDesktop()) return showToast('데스크탑 앱에서만 사용할 수 있습니다', true)
+  winDecorations = !winDecorations
+  await setDecorations(winDecorations)
+  showToast(winDecorations ? '타이틀바 표시' : '타이틀바 숨김 · 미니멀', true)
+}
+async function toggleClickThrough() {
+  if (!isDesktop()) return showToast('데스크탑 앱에서만 사용할 수 있습니다', true)
+  winClickThrough = !winClickThrough
+  await setClickThrough(winClickThrough)
+  showToast(winClickThrough ? '마우스 통과 켜짐 · 단축키로 해제' : '마우스 통과 꺼짐', true)
+}
+
+// 테마 변경 시 캔버스 배경 + 그리드 + 선택 외곽선을 새 색으로 다시 그린다.
+onThemeChange(() => {
+  scene.refreshBackground()
+  drawGridIfOn()
+  scene.drawSelection(sel.values(), lockedIdSet())
+  refreshGizmo()
+})
+
+// 키맵 액션 id를 실제 동작으로 잇는 디스패처(단축키·커맨드 팔레트 공용 진입점).
+function runAction(id: string) {
+  switch (id) {
+    // 보기
+    case 'view.fitAll': fitAll(); break
+    case 'view.focusSelected': focusSelected(); break
+    case 'view.zoomReset': zoomReset(); break
+    case 'view.toggleMinimap': minimap.toggle(); updateMinimap(); break
+    case 'view.toggleSnap':
+      snapOn = !snapOn
+      showToast(snapOn ? '스냅 켜짐 · 그리드/이웃' : '스냅 꺼짐', true)
+      break
+    case 'view.toggleGrid':
+      gridOn = !gridOn
+      drawGridIfOn()
+      showToast(gridOn ? '그리드 켜짐' : '그리드 꺼짐', true)
+      break
+    // 편집
+    case 'edit.selectAll': sel.set(scene.allIds()); break
+    case 'edit.escape':
+      if (cropMode) exitCropMode()
+      else {
+        sel.clear()
+        scene.drawRubber(null)
+        drag = null
+      }
+      break
+    case 'edit.delete': deleteSelected(); break
+    case 'edit.duplicate': void duplicateSelected(); break
+    case 'edit.undo': void doUndo(); break
+    case 'edit.redo': void doRedo(); break
+    case 'edit.toggleLock': toggleLock(); break
+    // 정렬·배치
+    case 'arrange.pack': packAll(); break
+    case 'arrange.group': groupSelected(); break
+    case 'arrange.ungroup': ungroupSelected(); break
+    case 'arrange.alignLeft': doAlign('left'); break
+    case 'arrange.alignRight': doAlign('right'); break
+    case 'arrange.alignTop': doAlign('top'); break
+    case 'arrange.alignBottom': doAlign('bottom'); break
+    case 'arrange.distributeH': doDistribute('h'); break
+    case 'arrange.distributeV': doDistribute('v'); break
+    case 'arrange.bringForward': applyZOrder(bringForward); break
+    case 'arrange.bringToFront': applyZOrder(bringToFront); break
+    case 'arrange.sendBackward': applyZOrder(sendBackward); break
+    case 'arrange.sendToBack': applyZOrder(sendToBack); break
+    // 변형
+    case 'transform.crop': enterCropMode(); break
+    case 'transform.resetCrop': resetCrop(); break
+    case 'transform.resetTransform': resetTransform(); break
+    case 'transform.flipH': flipSelected('x'); break
+    case 'transform.flipV': flipSelected('y'); break
+    // 파일
+    case 'file.import': openImageFiles(); break
+    case 'file.save': void save(); break
+    case 'file.open': void openBoard(); break
+    case 'file.exportScene': void exportScene(); break
+    case 'file.exportSelection': void exportSel(); break
+    // 앱
+    case 'app.commandPalette': openCommandPalette(); break
+    // 창(데스크탑 전용)
+    case 'window.toggleAlwaysOnTop': void toggleAlwaysOnTop(); break
+    case 'window.toggleDecorations': void toggleDecorations(); break
+    case 'window.toggleClickThrough': void toggleClickThrough(); break
+  }
+}
+
+// 커맨드 팔레트 열기(현재 액션 목록 전달, 항목 선택 시 runAction 실행).
+function openCommandPalette() {
+  openPalette(getActions(), (id) => runAction(id))
+}
+
 // ---- 키보드 단축키 ----
+// 키맵 테이블(matchKey)로 액션을 찾아 runAction에 위임한다. 재바인딩이 그대로 반영된다.
 window.addEventListener('keydown', (e) => {
+  // 입력 필드(팔레트 검색창 등) 포커스 중에는 단축키를 가로채지 않는다.
+  const target = e.target as HTMLElement | null
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
+  // 팔레트가 열려 있으면 팔레트가 캡처 단계에서 키를 처리하므로 여기선 무시.
+  if (isPaletteOpen()) return
+
+  const actionId = matchKey(e)
+  if (actionId) {
+    e.preventDefault()
+    runAction(actionId)
+    return
+  }
+  // 보조 바인딩(키맵 테이블엔 Delete/Ctrl+Shift+Z만 등록): Backspace=삭제, Ctrl+Y=다시실행.
   const ctrl = e.ctrlKey || e.metaKey
-  const k = e.key.toLowerCase()
-  if (e.key === ' ') {
-    e.preventDefault()
-    if (ctrl) fitAll()
-    else focusSelected()
-  } else if (ctrl && k === 'a') {
-    e.preventDefault()
-    sel.set(scene.allIds())
-  } else if (e.key === 'Escape') {
-    if (cropMode) {
-      exitCropMode()
-    } else {
-      sel.clear()
-      scene.drawRubber(null)
-      drag = null
-    }
-  } else if (e.key === 'Delete' || e.key === 'Backspace') {
+  if (e.key === 'Backspace') {
     deleteSelected()
-  } else if (ctrl && k === 'd') {
-    e.preventDefault()
-    void duplicateSelected()
-  } else if (ctrl && k === 'p') {
-    e.preventDefault()
-    packAll()
-  } else if (ctrl && k === 'i') {
-    e.preventDefault()
-    openImageFiles()
-  } else if (ctrl && k === '0') {
-    e.preventDefault()
-    zoomReset()
-  } else if (ctrl && k === 's') {
-    e.preventDefault()
-    void save()
-  } else if (ctrl && e.shiftKey && k === 'e') {
-    e.preventDefault()
-    void exportSel()
-  } else if (ctrl && k === 'e') {
-    e.preventDefault()
-    void exportScene()
-  } else if (ctrl && k === 'o') {
-    e.preventDefault()
-    void openBoard()
-  } else if (ctrl && e.shiftKey && k === 'g') {
-    e.preventDefault()
-    ungroupSelected()
-  } else if (ctrl && k === 'g') {
-    e.preventDefault()
-    groupSelected()
-  } else if (ctrl && !e.shiftKey && k === 'z') {
-    e.preventDefault()
-    void doUndo()
-  } else if (ctrl && (k === 'y' || (e.shiftKey && k === 'z'))) {
+  } else if (ctrl && e.key.toLowerCase() === 'y') {
     e.preventDefault()
     void doRedo()
-  } else if (ctrl && !e.shiftKey && e.key === 'ArrowLeft') {
-    e.preventDefault()
-    doAlign('left')
-  } else if (ctrl && !e.shiftKey && e.key === 'ArrowRight') {
-    e.preventDefault()
-    doAlign('right')
-  } else if (ctrl && !e.shiftKey && e.key === 'ArrowUp') {
-    e.preventDefault()
-    doAlign('top')
-  } else if (ctrl && !e.shiftKey && e.key === 'ArrowDown') {
-    e.preventDefault()
-    doAlign('bottom')
-  } else if (ctrl && e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-    e.preventDefault()
-    doDistribute('h')
-  } else if (ctrl && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-    e.preventDefault()
-    doDistribute('v')
-  } else if (e.code === 'BracketRight') {
-    e.preventDefault()
-    applyZOrder(e.shiftKey ? bringToFront : bringForward)
-  } else if (e.code === 'BracketLeft') {
-    e.preventDefault()
-    applyZOrder(e.shiftKey ? sendToBack : sendBackward)
-  } else if (!ctrl && k === 'm') {
-    minimap.toggle()
-    updateMinimap()
-  } else if (!ctrl && k === 'n') {
-    snapOn = !snapOn
-    showToast(snapOn ? '스냅 켜짐 · 그리드/이웃' : '스냅 꺼짐', true)
-  } else if (!ctrl && !e.altKey && k === 'g') {
-    gridOn = !gridOn
-    drawGridIfOn()
-    showToast(gridOn ? '그리드 켜짐' : '그리드 꺼짐', true)
-  } else if (e.altKey && e.code === 'KeyL') {
-    e.preventDefault()
-    toggleLock()
-  } else if (e.altKey && e.shiftKey && e.code === 'KeyH') {
-    e.preventDefault()
-    flipSelected('x')
-  } else if (e.altKey && e.shiftKey && e.code === 'KeyV') {
-    e.preventDefault()
-    flipSelected('y')
-  } else if (ctrl && e.shiftKey && k === 'c') {
-    e.preventDefault()
-    resetCrop()
-  } else if (ctrl && e.shiftKey && k === 't') {
-    e.preventDefault()
-    resetTransform()
-  } else if (!ctrl && k === 'c') {
-    enterCropMode()
   }
 })
 
@@ -966,8 +1031,10 @@ async function importFiles(files: File[], baseX: number, baseY: number) {
     showLoading(files.length > 1 ? `이미지 불러오는 중… ${i + 1}/${files.length}` : '이미지 불러오는 중…')
     try {
       const url = await fileToDataURL(files[i])
-      const size = await imageSize(url)
-      valid.push({ url, size })
+      // 대형 이미지는 자동 다운스케일(메모리·.refb 크기·렌더 성능 절감). 긴 변 4096px 초과분만 줄인다.
+      // downscaleIfLarge가 결과 픽셀 크기를 함께 반환하므로 별도 imageSize 호출은 불필요.
+      const ds = await downscaleIfLarge(url, { maxEdge: 4096 })
+      valid.push({ url: ds.dataUrl, size: { w: ds.width, h: ds.height } })
     } catch {
       failed++
     }
@@ -1032,14 +1099,6 @@ function fileToDataURL(file: File): Promise<string> {
     r.onload = () => resolve(r.result as string)
     r.onerror = () => reject(r.error)
     r.readAsDataURL(file)
-  })
-}
-function imageSize(src: string): Promise<{ w: number; h: number }> {
-  return new Promise((resolve, reject) => {
-    const im = new Image()
-    im.onload = () => resolve({ w: im.naturalWidth, h: im.naturalHeight })
-    im.onerror = () => reject(new Error('이미지 로드 실패'))
-    im.src = src
   })
 }
 

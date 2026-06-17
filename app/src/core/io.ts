@@ -13,7 +13,17 @@ import { unpackRefb } from './refb'
  * @returns     복원된 보드 상태
  */
 export async function loadBoardFile(file: File): Promise<BoardState> {
-  const state = await unpackRefb(file)
+  return loadBoardBlob(file)
+}
+
+/**
+ * Blob/바이트(.refb)를 읽어 BoardState로 복원한다(Tauri 네이티브 읽기 경로 공용).
+ * File도 Blob이므로 loadBoardFile이 이 함수를 그대로 사용한다.
+ * @param blob  .refb 컨테이너(ZIP) 또는 구버전 평문 JSON Blob
+ * @returns     복원·검증된 보드 상태
+ */
+export async function loadBoardBlob(blob: Blob): Promise<BoardState> {
+  const state = await unpackRefb(blob)
   // 최소 유효성 검증: refboard 스키마인지 확인. 잘못된 .refb/타 파일 차단.
   if (
     !state ||

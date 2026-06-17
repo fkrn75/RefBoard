@@ -11,10 +11,14 @@
   },
   "dependencies": {
     "@pixi/gif": "^3.0.1",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-fs": "^2.5.1",
     "fflate": "^0.8.3",
     "pixi.js": "^8.6.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.5"
   }
