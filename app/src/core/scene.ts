@@ -1,7 +1,8 @@
-import { Application, Container, Graphics, Sprite, Texture, Assets, type FederatedPointerEvent } from 'pixi.js'
+import { Application, Container, Graphics, Sprite, Texture, Assets, Rectangle, type FederatedPointerEvent } from 'pixi.js'
 import { AnimatedGIF } from '@pixi/gif'
 import type { BoardImage } from './board'
 import type { GizmoHandle } from './gizmo'
+import { cropToFrame } from './crop'
 
 // 화면 입력 1건을 "월드 좌표 + 적중 아이템"으로 정규화한 형태.
 export interface ScenePointer {
@@ -113,7 +114,17 @@ export class Scene {
     this.applyTransform(sprite, img)
     this.world.addChild(sprite)
     this.sprites.set(img.id, sprite)
+    if (img.crop) this.applyCrop(img.id, img) // 저장본/복원 시 크롭 반영
     return sprite
+  }
+
+  // crop(원본 픽셀 사각형) 반영 — 공유 source는 유지하고 frame만 교체(비파괴). GIF는 미지원.
+  // crop이 없으면 원본 전체 frame으로 되돌린다(크롭 리셋 경로).
+  applyCrop(id: string, img: BoardImage) {
+    const sprite = this.sprites.get(id)
+    if (!sprite || sprite instanceof AnimatedGIF) return
+    const f = cropToFrame(img.crop, img.natural)
+    sprite.texture = new Texture({ source: sprite.texture.source, frame: new Rectangle(f.x, f.y, f.w, f.h) })
   }
 
   // src가 GIF인지 판별(data URL 또는 .gif 확장자)

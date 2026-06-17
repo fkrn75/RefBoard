@@ -9,6 +9,7 @@ import { snapToNeighbors, snapDeltaToGrid, type AABB } from './core/snap'
 import { bringToFront, sendToBack, bringForward, sendBackward, normalizeZ } from './core/zorder'
 import { alignEdge, distribute, normalizeSize, type AlignItem } from './core/align'
 import { handlePositions, hitTest, scaleFromHandle, rotateFromPointer, type HandleId } from './core/gizmo'
+import { cropRectFromDrag } from './core/crop'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -227,6 +228,14 @@ let drag: DragState = null
 
 scene.onPointerDown = (p: ScenePointer) => {
   if (p.button !== 0) return // 좌클릭만 (우클릭은 팬)
+  // 0) 크롭 모드: 대상 이미지 기준 드래그 시작점(원본픽셀) 기록
+  if (cropMode && cropTargetId) {
+    const im = board.items.find((i) => i.id === cropTargetId)
+    if (im) {
+      cropDrag = { startPix: worldToPixel(im, p.world.x, p.world.y), startWorld: p.world }
+      return
+    }
+  }
   // 1) 변형 기즈모 핸들 우선 판정(단일 선택·비잠금)
   if (sel.size === 1) {
     const gid = sel.values()[0]
@@ -267,6 +276,11 @@ scene.onPointerDown = (p: ScenePointer) => {
 }
 
 scene.onPointerMove = (p: ScenePointer) => {
+  // 크롭 모드: 드래그 사각형 미리보기(월드 좌표)
+  if (cropMode) {
+    if (cropDrag) scene.drawRubber(rectOf(cropDrag.startWorld, p.world))
+    return
+  }
   if (!drag) return
   if (drag.mode === 'gizmo') {
     const gd = drag // 타입 내로잉 캡처(아래 콜백/commit 이후에도 'gizmo'로 고정)
@@ -335,6 +349,30 @@ scene.onPointerMove = (p: ScenePointer) => {
 }
 
 scene.onPointerUp = (p: ScenePointer) => {
+  // 크롭 모드: 드래그 영역을 원본픽셀 크롭으로 확정(크롭 영역은 제자리 유지)
+  if (cropMode) {
+    if (cropDrag && cropTargetId) {
+      const im = board.items.find((i) => i.id === cropTargetId)
+      if (im) {
+        const endPix = worldToPixel(im, p.world.x, p.world.y)
+        const nc = cropRectFromDrag(cropDrag.startPix, endPix, im.natural)
+        if (nc.w > 4 && nc.h > 4) {
+          // 크롭 영역 중심의 현재 월드 위치 → 크롭 후 그 점이 새 중심이 되게(제자리 유지)
+          const wc = pixelToWorld(im, nc.x + nc.w / 2, nc.y + nc.h / 2)
+          commit()
+          im.crop = nc
+          im.transform.x = wc.x
+          im.transform.y = wc.y
+          scene.applyCrop(im.id, im)
+          const s = scene.getSprite(im.id)
+          if (s) scene.applyTransform(s, im)
+          afterEdit()
+        }
+      }
+    }
+    exitCropMode()
+    return
+  }
   if (!drag) return
   if (drag.mode === 'rubber') {
     const r = rectOf(drag.start, p.world)
@@ -451,6 +489,89 @@ function flipSelected(axis: 'x' | 'y') {
   }
 }
 
+// ---- 크롭 (Phase 2.2, 비파괴) ----
+let cropMode = false
+let cropTargetId: string | null = null
+let cropDrag: { startPix: { x: number; y: number }; startWorld: { x: number; y: number } } | null = null
+
+// 월드좌표 → 이미지 원본픽셀 (중심·scale·rotation·flip·기존 crop 역적용)
+function worldToPixel(im: BoardImage, wx: number, wy: number): { x: number; y: number } {
+  const dx = wx - im.transform.x
+  const dy = wy - im.transform.y
+  const cos = Math.cos(-im.transform.rotation)
+  const sin = Math.sin(-im.transform.rotation)
+  let lx = (dx * cos - dy * sin) / im.transform.scale
+  let ly = (dx * sin + dy * cos) / im.transform.scale
+  if (im.transform.flipX) lx = -lx
+  if (im.transform.flipY) ly = -ly
+  const dispW = im.crop ? im.crop.w : im.natural.w
+  const dispH = im.crop ? im.crop.h : im.natural.h
+  return { x: (im.crop ? im.crop.x : 0) + lx + dispW / 2, y: (im.crop ? im.crop.y : 0) + ly + dispH / 2 }
+}
+// 이미지 원본픽셀 → 월드좌표 (worldToPixel 역변환)
+function pixelToWorld(im: BoardImage, px: number, py: number): { x: number; y: number } {
+  const dispW = im.crop ? im.crop.w : im.natural.w
+  const dispH = im.crop ? im.crop.h : im.natural.h
+  let lx = px - (im.crop ? im.crop.x : 0) - dispW / 2
+  let ly = py - (im.crop ? im.crop.y : 0) - dispH / 2
+  if (im.transform.flipX) lx = -lx
+  if (im.transform.flipY) ly = -ly
+  lx *= im.transform.scale
+  ly *= im.transform.scale
+  const cos = Math.cos(im.transform.rotation)
+  const sin = Math.sin(im.transform.rotation)
+  return { x: im.transform.x + lx * cos - ly * sin, y: im.transform.y + lx * sin + ly * cos }
+}
+function enterCropMode() {
+  if (sel.size !== 1) {
+    showToast('크롭은 이미지 1개만 선택했을 때 가능합니다', true)
+    return
+  }
+  cropMode = true
+  cropTargetId = sel.values()[0]
+  scene.drawGizmo([])
+  showToast('크롭 모드: 이미지 위에서 드래그 · Esc 취소', true)
+}
+function exitCropMode() {
+  cropMode = false
+  cropTargetId = null
+  cropDrag = null
+  scene.drawRubber(null)
+  refreshGizmo()
+}
+// 크롭 리셋 (Ctrl+Shift+C): 선택 항목의 crop 제거(원본 전체로)
+function resetCrop() {
+  const ids = sel.values()
+  if (ids.length === 0) return
+  commit()
+  for (const id of ids) {
+    const im = board.items.find((i) => i.id === id)
+    if (!im || !im.crop) continue
+    delete im.crop
+    scene.applyCrop(id, im)
+    const s = scene.getSprite(id)
+    if (s) scene.applyTransform(s, im)
+  }
+  afterEdit()
+}
+// 변형 리셋 (Ctrl+Shift+T): scale=1·rotation=0·flip 해제 (crop·위치는 유지)
+function resetTransform() {
+  const ids = sel.values()
+  if (ids.length === 0) return
+  commit()
+  for (const id of ids) {
+    const im = board.items.find((i) => i.id === id)
+    if (!im) continue
+    im.transform.scale = 1
+    im.transform.rotation = 0
+    im.transform.flipX = false
+    im.transform.flipY = false
+    const s = scene.getSprite(id)
+    if (s) scene.applyTransform(s, im)
+  }
+  afterEdit()
+}
+
 // ---- 정렬 / 분배 / 정규화 (Phase 2.4) ----
 function alignItems(): AlignItem[] {
   const out: AlignItem[] = []
@@ -558,9 +679,13 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault()
     sel.set(scene.allIds())
   } else if (e.key === 'Escape') {
-    sel.clear()
-    scene.drawRubber(null)
-    drag = null
+    if (cropMode) {
+      exitCropMode()
+    } else {
+      sel.clear()
+      scene.drawRubber(null)
+      drag = null
+    }
   } else if (e.key === 'Delete' || e.key === 'Backspace') {
     deleteSelected()
   } else if (ctrl && k === 'd') {
@@ -623,6 +748,14 @@ window.addEventListener('keydown', (e) => {
   } else if (e.altKey && e.shiftKey && e.code === 'KeyV') {
     e.preventDefault()
     flipSelected('y')
+  } else if (ctrl && e.shiftKey && k === 'c') {
+    e.preventDefault()
+    resetCrop()
+  } else if (ctrl && e.shiftKey && k === 't') {
+    e.preventDefault()
+    resetTransform()
+  } else if (!ctrl && k === 'c') {
+    enterCropMode()
   }
 })
 
@@ -730,6 +863,9 @@ function imageSize(src: string): Promise<{ w: number; h: number }> {
   bringToFront: () => applyZOrder(bringToFront),
   sendToBack: () => applyZOrder(sendToBack),
   flip: flipSelected,
+  crop: enterCropMode,
+  resetCrop,
+  resetTransform,
   align: doAlign,
   distribute: doDistribute,
   normalize: doNormalize,
