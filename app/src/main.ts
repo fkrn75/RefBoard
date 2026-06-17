@@ -1,5 +1,5 @@
 import { Scene, type ScenePointer, type Rect } from './core/scene'
-import { createEmptyBoard, genId, type BoardImage, type BoardState } from './core/board'
+import { createEmptyBoard, genId, type BoardImage, type BoardState, type Transform } from './core/board'
 import { Selection } from './core/selection'
 import { packImages } from './core/pack'
 import { saveBoard, loadBoardFile, pickRefbFile } from './core/io'
@@ -7,8 +7,10 @@ import { History } from './core/history'
 import { Minimap } from './core/minimap'
 import { snapToNeighbors, snapDeltaToGrid, type AABB } from './core/snap'
 import { bringToFront, sendToBack, bringForward, sendBackward, normalizeZ } from './core/zorder'
+import { alignEdge, distribute, normalizeSize, type AlignItem } from './core/align'
+import { handlePositions, hitTest, scaleFromHandle, rotateFromPointer, type HandleId } from './core/gizmo'
 
-// 앱 진입점: Scene을 만들고 입력(선택/이동/줌/팬/가져오기/단축키)을 배선한다.
+// 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
 const hint = document.getElementById('hint') as HTMLElement
 
@@ -19,11 +21,13 @@ const sel = new Selection()
 const history = new History()
 let cam = { ...board.camera }
 
-// 선택이 바뀌면 선택 외곽선 다시 그림
-sel.onChange(() => scene.drawSelection(sel.values()))
+// 선택이 바뀌면 선택 외곽선 + 기즈모 다시 그림
+sel.onChange(() => {
+  scene.drawSelection(sel.values())
+  refreshGizmo()
+})
 
 // ---- UI: 로딩 인디케이터 / 토스트 / 저장상태(dirty) ----
-// 화면 중앙 로딩 표시(대용량·다수 이미지 가져올 때)
 const loadingEl = document.createElement('div')
 loadingEl.style.cssText =
   'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:14px 22px;' +
@@ -38,7 +42,6 @@ function hideLoading() {
   loadingEl.style.display = 'none'
 }
 
-// 하단 토스트(디코드 실패 등 사용자 알림). 기본 경고색, info=true면 중립색.
 const toastEl = document.createElement('div')
 toastEl.style.cssText =
   'position:fixed;left:50%;bottom:32px;transform:translateX(-50%);padding:10px 18px;' +
@@ -69,21 +72,40 @@ function commit() {
 window.addEventListener('beforeunload', (e) => {
   if (!dirty) return
   e.preventDefault()
-  e.returnValue = '' // 일부 브라우저는 반환값이 있어야 경고 표시
+  e.returnValue = ''
 })
 
 // ---- 미니맵 / 스냅 ----
 const minimap = new Minimap(host)
-minimap.setVisible(false) // 기본 숨김(M 키로 토글)
-let snapOn = false // 스냅(그리드·이웃) 토글 (N 키)
+minimap.setVisible(false)
+let snapOn = false
 function updateMinimap() {
   minimap.update(scene.contentBounds(), cam, host.clientWidth, host.clientHeight)
 }
-// 미니맵 클릭 → 그 월드점을 화면 중앙으로 이동
 minimap.onJump = (wx, wy) => {
   cam.x = host.clientWidth / 2 - wx * cam.zoom
   cam.y = host.clientHeight / 2 - wy * cam.zoom
   applyCam()
+}
+
+// 단일 선택일 때만 변형 기즈모 핸들 표시(다중/0/잠금은 숨김)
+function refreshGizmo() {
+  const ids = sel.values()
+  if (ids.length === 1) {
+    const im = board.items.find((i) => i.id === ids[0])
+    if (im && !im.locked) {
+      scene.drawGizmo(handlePositions(im.transform, im.natural, 30 / cam.zoom))
+      return
+    }
+  }
+  scene.drawGizmo([])
+}
+
+// 편집(이동/변형/정렬) 후 공통 갱신: 선택외곽선 + 기즈모 + 미니맵
+function afterEdit() {
+  scene.drawSelection(sel.values())
+  refreshGizmo()
+  updateMinimap()
 }
 
 // ---- 카메라 ----
@@ -91,6 +113,7 @@ function applyCam() {
   scene.setCamera(cam.x, cam.y, cam.zoom)
   board.camera = { ...cam }
   scene.drawSelection(sel.values()) // 줌 변화에 맞춰 외곽선 두께(줌 보정) 갱신
+  refreshGizmo() // 핸들 크기/오프셋도 줌 보정
   updateMinimap()
 }
 applyCam()
@@ -110,13 +133,11 @@ function fitBounds(b: { minX: number; minY: number; maxX: number; maxY: number }
   applyCam()
 }
 
-// 전체 보기(Ctrl+Space): 모든 아이템이 보이게 맞춤
 function fitAll() {
   const b = scene.contentBounds()
   if (b) fitBounds(b)
 }
 
-// 선택(없으면 첫) 이미지에 포커스(Space)
 function focusSelected() {
   const id = sel.values()[0] ?? scene.allIds()[0]
   if (!id) return
@@ -124,7 +145,6 @@ function focusSelected() {
   if (a) fitBounds(a, 0.8)
 }
 
-// 줌 100% 리셋(Ctrl+0): 화면 중심의 월드점을 유지하며 배율만 1로
 function zoomReset() {
   const W = host.clientWidth
   const H = host.clientHeight
@@ -135,7 +155,7 @@ function zoomReset() {
   applyCam()
 }
 
-// 보드 통째 복원(열기·undo·redo 공용): 렌더 재구성 + 카메라/선택/힌트 동기화
+// 보드 통째 복원(열기·undo·redo 공용)
 async function restore(state: BoardState) {
   board = state
   await scene.rebuild(board.items)
@@ -187,26 +207,41 @@ host.addEventListener('pointerup', (e) => {
   }
 })
 host.addEventListener('contextmenu', (e) => e.preventDefault())
-// 더블클릭: 그 아래 이미지에 포커스(없으면 전체 보기)
 host.addEventListener('dblclick', () => {
   if (sel.size > 0 || scene.allIds().length > 0) focusSelected()
 })
 
-// ---- 선택 + 이동 + 러버밴드 (PixiJS 좌클릭 이벤트) ----
+// ---- 선택 + 이동 + 러버밴드 + 기즈모 변형 (PixiJS 좌클릭 이벤트) ----
 type DragState =
   | {
       mode: 'move'
       start: { x: number; y: number }
       origins: Map<string, { x: number; y: number }>
       committed: boolean
-      others: AABB[] // 스냅 타깃(선택 안 된 다른 아이템 AABB), 드래그 시작 시 1회 캐시
+      others: AABB[]
     }
   | { mode: 'rubber'; start: { x: number; y: number }; additive: boolean }
+  | { mode: 'gizmo'; handle: HandleId; id: string; t0: Transform; start: { x: number; y: number }; committed: boolean }
   | null
 let drag: DragState = null
 
 scene.onPointerDown = (p: ScenePointer) => {
   if (p.button !== 0) return // 좌클릭만 (우클릭은 팬)
+  // 1) 변형 기즈모 핸들 우선 판정(단일 선택·비잠금)
+  if (sel.size === 1) {
+    const gid = sel.values()[0]
+    const gim = board.items.find((i) => i.id === gid)
+    if (gim && !gim.locked) {
+      const handles = handlePositions(gim.transform, gim.natural, 30 / cam.zoom)
+      const hit = hitTest(p.world, handles, 9 / cam.zoom)
+      if (hit) {
+        drag = { mode: 'gizmo', handle: hit, id: gid, t0: { ...gim.transform }, start: p.world, committed: false }
+        host.style.cursor = hit === 'rotate' ? 'grabbing' : 'nwse-resize'
+        return
+      }
+    }
+  }
+  // 2) 이미지 선택 + 이동
   if (p.hitId) {
     if (p.shift) sel.toggle(p.hitId)
     else if (!sel.has(p.hitId)) sel.set([p.hitId])
@@ -215,7 +250,6 @@ scene.onPointerDown = (p: ScenePointer) => {
       const img = board.items.find((i) => i.id === id)
       if (img && !img.locked) origins.set(id, { x: img.transform.x, y: img.transform.y })
     }
-    // 스냅 타깃: 이동하지 않는(선택 외) 아이템들의 AABB를 시작 시 1회 캐시(매 move 재계산 비용 방지)
     const others: AABB[] = []
     for (const id of scene.allIds()) {
       if (origins.has(id)) continue
@@ -223,10 +257,10 @@ scene.onPointerDown = (p: ScenePointer) => {
       if (a) others.push(a)
     }
     drag = { mode: 'move', start: p.world, origins, committed: false, others }
-    // 이동 드래그 동안 커서를 grabbing으로(캔버스 전체 + 스프라이트)
     host.style.cursor = 'grabbing'
     scene.setCursor('grabbing')
   } else {
+    // 3) 빈 곳 → 러버밴드
     if (!p.shift) sel.clear()
     drag = { mode: 'rubber', start: p.world, additive: p.shift }
   }
@@ -234,15 +268,34 @@ scene.onPointerDown = (p: ScenePointer) => {
 
 scene.onPointerMove = (p: ScenePointer) => {
   if (!drag) return
+  if (drag.mode === 'gizmo') {
+    const gd = drag // 타입 내로잉 캡처(아래 콜백/commit 이후에도 'gizmo'로 고정)
+    const im = board.items.find((i) => i.id === gd.id)
+    if (!im) return
+    if (!gd.committed) {
+      commit()
+      gd.committed = true
+    }
+    if (gd.handle === 'rotate') {
+      im.transform.rotation = rotateFromPointer(gd.t0, gd.start, p.world, p.shift).rotation
+    } else {
+      const r = scaleFromHandle(gd.handle, gd.t0, im.natural, gd.start, p.world, { centered: p.alt })
+      im.transform.scale = r.scale
+      im.transform.x = r.x
+      im.transform.y = r.y
+    }
+    const s = scene.getSprite(gd.id)
+    if (s) scene.applyTransform(s, im)
+    afterEdit()
+    return
+  }
   if (drag.mode === 'move') {
     let dx = p.world.x - drag.start.x
     let dy = p.world.y - drag.start.y
-    // Shift = 축 고정(수평/수직 중 더 많이 움직인 축만)
     if (p.shift) {
       if (Math.abs(dx) >= Math.abs(dy)) dy = 0
       else dx = 0
     }
-    // 실제 이동이 처음 발생할 때 1회만 히스토리에 기록(클릭만으로는 기록 안 함)
     if (!drag.committed && (dx !== 0 || dy !== 0)) {
       commit()
       drag.committed = true
@@ -255,14 +308,14 @@ scene.onPointerMove = (p: ScenePointer) => {
       const s = scene.getSprite(id)
       if (s) scene.applyTransform(s, img)
     }
-    // 스냅(켜졌을 때): 대표(첫 선택) 아이템 기준 보정량을 전 선택에 동일 적용. 이웃 우선, 없으면 그리드.
+    // 스냅(켜졌을 때): 대표(첫) 아이템 기준 보정량을 전 선택에 적용. 이웃 우선→그리드.
     if (snapOn && drag.origins.size > 0) {
       const repId = [...drag.origins.keys()][0]
       const a = scene.getItemAABB(repId)
       if (a) {
-        const thr = 8 / cam.zoom // 화면 8px를 월드 단위로
+        const thr = 8 / cam.zoom
         let adj = snapToNeighbors(a, drag.others, thr)
-        if (adj.dx === 0 && adj.dy === 0) adj = snapDeltaToGrid(a.minX, a.minY, 32) // 이웃 없으면 32px 그리드
+        if (adj.dx === 0 && adj.dy === 0) adj = snapDeltaToGrid(a.minX, a.minY, 32)
         if (adj.dx !== 0 || adj.dy !== 0) {
           for (const [id, o] of drag.origins) {
             const img = board.items.find((i) => i.id === id)
@@ -275,9 +328,8 @@ scene.onPointerMove = (p: ScenePointer) => {
         }
       }
     }
-    scene.drawSelection(sel.values())
-    updateMinimap()
-  } else {
+    afterEdit()
+  } else if (drag.mode === 'rubber') {
     scene.drawRubber(rectOf(drag.start, p.world))
   }
 }
@@ -294,9 +346,11 @@ scene.onPointerUp = (p: ScenePointer) => {
     else sel.set(hits)
     scene.drawRubber(null)
   } else if (drag.mode === 'move') {
-    // 이동 종료 → 커서 복원(빈 곳=기본, 스프라이트 hover=grab)
     host.style.cursor = ''
     scene.setCursor('grab')
+    updateMinimap()
+  } else if (drag.mode === 'gizmo') {
+    host.style.cursor = ''
     updateMinimap()
   }
   drag = null
@@ -306,9 +360,8 @@ function rectOf(a: { x: number; y: number }, b: { x: number; y: number }): Rect 
   return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) }
 }
 
-// ---- 동작: 삭제 / 복제 / 자동 패킹 / z순서 / 저장 / 열기 / Undo / Redo ----
+// ---- 동작: 삭제 / 복제 / 패킹 / z순서 / 뒤집기 / 정렬 / 저장 / 열기 / Undo / Redo ----
 
-// 선택 삭제 (Del/Backspace)
 function deleteSelected() {
   const ids = sel.values()
   if (ids.length === 0) return
@@ -318,14 +371,13 @@ function deleteSelected() {
     const idx = board.items.findIndex((i) => i.id === id)
     if (idx >= 0) board.items.splice(idx, 1)
   }
-  normalizeZ(board.items) // 삭제로 생긴 빈 z 정리(빈틈없는 연속 정수)
+  normalizeZ(board.items)
   syncZIndex()
   sel.clear()
   updateMinimap()
   if (board.items.length === 0) hint.style.display = ''
 }
 
-// 선택 복제 (Ctrl+D) — 깊은 복제 + 새 id + 살짝 어긋난 위치
 async function duplicateSelected() {
   const ids = sel.values()
   if (ids.length === 0) return
@@ -347,7 +399,6 @@ async function duplicateSelected() {
   updateMinimap()
 }
 
-// 자동 패킹 (Ctrl+P) — 선택 2개 이상이면 선택만, 아니면 전체. 패킹 후 전체 보기.
 function packAll() {
   const targets = sel.size > 1 ? sel.values() : scene.allIds()
   if (targets.length < 2) return
@@ -358,7 +409,6 @@ function packAll() {
   })
   const aspect = Math.max(0.1, host.clientWidth / host.clientHeight)
   const pos = packImages(items, { aspect, padding: 16 })
-  // packImages는 바운딩 중심이 원점(0,0)인 중심 좌표를 반환 → 현재 뷰 중앙(월드)으로 평행이동
   const center = scene.screenToWorld(host.clientWidth / 2, host.clientHeight / 2)
   for (const id of targets) {
     const im = board.items.find((i) => i.id === id)
@@ -369,17 +419,16 @@ function packAll() {
     const s = scene.getSprite(id)
     if (s) scene.applyTransform(s, im)
   }
-  fitAll() // 패킹 결과가 화면에 꽉 차게(내부 applyCam이 미니맵도 갱신)
+  fitAll()
 }
 
-// z순서 변경의 공통 처리: 히스토리 적재 → 모듈 호출 → 각 스프라이트 zIndex 동기화
+// z순서 변경 공통: 히스토리 적재 → 모듈 호출 → zIndex 동기화
 function applyZOrder(fn: (items: BoardImage[], ids: Set<string> | string[]) => void) {
   if (sel.size === 0) return
   commit()
   fn(board.items, sel.values())
   syncZIndex()
 }
-// board.items[].z → 스프라이트 zIndex 반영(world.sortableChildren로 재정렬)
 function syncZIndex() {
   for (const im of board.items) {
     const s = scene.getSprite(im.id)
@@ -387,7 +436,70 @@ function syncZIndex() {
   }
 }
 
-// 파일 열기 다이얼로그로 이미지 가져오기 (Ctrl+I)
+// 좌우/상하 뒤집기 (Alt+Shift+H / Alt+Shift+V) — 비파괴(transform.flipX/Y 토글)
+function flipSelected(axis: 'x' | 'y') {
+  const ids = sel.values()
+  if (ids.length === 0) return
+  commit()
+  for (const id of ids) {
+    const img = board.items.find((i) => i.id === id)
+    if (!img) continue
+    if (axis === 'x') img.transform.flipX = !img.transform.flipX
+    else img.transform.flipY = !img.transform.flipY
+    const s = scene.getSprite(id)
+    if (s) scene.applyTransform(s, img)
+  }
+}
+
+// ---- 정렬 / 분배 / 정규화 (Phase 2.4) ----
+function alignItems(): AlignItem[] {
+  const out: AlignItem[] = []
+  for (const id of sel.values()) {
+    const im = board.items.find((i) => i.id === id)
+    const a = scene.getItemAABB(id)
+    if (im && a) out.push({ id, aabb: a, cx: im.transform.x, cy: im.transform.y, natural: im.natural, scale: im.transform.scale })
+  }
+  return out
+}
+function applyDeltas(deltas: Map<string, { dx: number; dy: number }>) {
+  for (const [id, d] of deltas) {
+    const im = board.items.find((i) => i.id === id)
+    if (!im) continue
+    im.transform.x += d.dx
+    im.transform.y += d.dy
+    const s = scene.getSprite(id)
+    if (s) scene.applyTransform(s, im)
+  }
+}
+function doAlign(edge: 'left' | 'right' | 'top' | 'bottom' | 'hcenter' | 'vcenter') {
+  const items = alignItems()
+  if (items.length < 2) return
+  commit()
+  applyDeltas(alignEdge(items, edge))
+  afterEdit()
+}
+function doDistribute(axis: 'h' | 'v') {
+  const items = alignItems()
+  if (items.length < 3) return
+  commit()
+  applyDeltas(distribute(items, axis))
+  afterEdit()
+}
+function doNormalize(mode: 'width' | 'height' | 'scale') {
+  const items = alignItems()
+  if (items.length < 2) return
+  commit()
+  for (const [id, sc] of normalizeSize(items, mode)) {
+    const im = board.items.find((i) => i.id === id)
+    if (!im) continue
+    im.transform.scale = sc.scale
+    const s = scene.getSprite(id)
+    if (s) scene.applyTransform(s, im)
+  }
+  afterEdit()
+}
+
+// 파일 열기 다이얼로그 (Ctrl+I)
 function openImageFiles() {
   const input = document.createElement('input')
   input.type = 'file'
@@ -401,26 +513,24 @@ function openImageFiles() {
   input.click()
 }
 
-// 보드 열기 (Ctrl+O)
 async function openBoard() {
   const file = await pickRefbFile()
   if (!file) return
   try {
     const state = await loadBoardFile(file)
-    history.push(board) // 열기 직전 상태도 undo 가능하게
+    history.push(board)
     await restore(state)
-    setDirty(false) // 방금 연 파일 = 저장된 상태
+    setDirty(false)
   } catch (err) {
     showToast(err instanceof Error ? err.message : '파일 열기 실패')
   }
 }
 
-// Undo / Redo — 현재 상태를 넘겨 반대편 스택에 보존
 async function doUndo() {
   const prev = history.undo(board)
   if (prev) {
     await restore(prev)
-    setDirty(true) // 되돌림도 저장 안 된 변경
+    setDirty(true)
   }
 }
 async function doRedo() {
@@ -431,7 +541,6 @@ async function doRedo() {
   }
 }
 
-// 저장: .refb 다운로드 후 dirty 해제
 function save() {
   saveBoard(board)
   setDirty(false)
@@ -442,7 +551,6 @@ window.addEventListener('keydown', (e) => {
   const ctrl = e.ctrlKey || e.metaKey
   const k = e.key.toLowerCase()
   if (e.key === ' ') {
-    // Ctrl+Space = 전체 보기, Space = 선택 이미지 포커스
     e.preventDefault()
     if (ctrl) fitAll()
     else focusSelected()
@@ -479,29 +587,48 @@ window.addEventListener('keydown', (e) => {
   } else if (ctrl && (k === 'y' || (e.shiftKey && k === 'z'))) {
     e.preventDefault()
     void doRedo()
+  } else if (ctrl && !e.shiftKey && e.key === 'ArrowLeft') {
+    e.preventDefault()
+    doAlign('left')
+  } else if (ctrl && !e.shiftKey && e.key === 'ArrowRight') {
+    e.preventDefault()
+    doAlign('right')
+  } else if (ctrl && !e.shiftKey && e.key === 'ArrowUp') {
+    e.preventDefault()
+    doAlign('top')
+  } else if (ctrl && !e.shiftKey && e.key === 'ArrowDown') {
+    e.preventDefault()
+    doAlign('bottom')
+  } else if (ctrl && e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault()
+    doDistribute('h')
+  } else if (ctrl && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+    e.preventDefault()
+    doDistribute('v')
   } else if (e.code === 'BracketRight') {
-    // ] = 한 단계 앞, Shift+] = 맨 앞
     e.preventDefault()
     applyZOrder(e.shiftKey ? bringToFront : bringForward)
   } else if (e.code === 'BracketLeft') {
-    // [ = 한 단계 뒤, Shift+[ = 맨 뒤
     e.preventDefault()
     applyZOrder(e.shiftKey ? sendToBack : sendBackward)
   } else if (!ctrl && k === 'm') {
-    // 미니맵 토글
     minimap.toggle()
     updateMinimap()
   } else if (!ctrl && k === 'n') {
-    // 스냅(그리드·이웃) 토글
     snapOn = !snapOn
     showToast(snapOn ? '스냅 켜짐 · 그리드/이웃' : '스냅 꺼짐', true)
+  } else if (e.altKey && e.shiftKey && e.code === 'KeyH') {
+    e.preventDefault()
+    flipSelected('x')
+  } else if (e.altKey && e.shiftKey && e.code === 'KeyV') {
+    e.preventDefault()
+    flipSelected('y')
   }
 })
 
-// ---- 가져오기 공통: 파일 다수 → 로딩 표시 + 개별 디코드 에러 토스트 + 1 undo 묶음 ----
+// ---- 가져오기 공통 ----
 async function importFiles(files: File[], baseX: number, baseY: number) {
   if (files.length === 0) return
-  // 1단계: 디코드 검증(원본 크기 측정). 실패한 파일은 건너뜀.
   const valid: { url: string; size: { w: number; h: number } }[] = []
   let failed = 0
   for (let i = 0; i < files.length; i++) {
@@ -514,7 +641,6 @@ async function importFiles(files: File[], baseX: number, baseY: number) {
       failed++
     }
   }
-  // 2단계: 유효한 것만 한 묶음(1 undo)으로 추가
   if (valid.length > 0) {
     commit()
     for (let j = 0; j < valid.length; j++) {
@@ -529,7 +655,6 @@ async function importFiles(files: File[], baseX: number, baseY: number) {
   }
 }
 
-// ---- 가져오기: 드래그앤드롭 ----
 host.addEventListener('dragover', (e) => e.preventDefault())
 host.addEventListener('drop', async (e) => {
   e.preventDefault()
@@ -541,7 +666,6 @@ host.addEventListener('drop', async (e) => {
   await importFiles(files, at.x, at.y)
 })
 
-// ---- 가져오기: 클립보드 붙여넣기 ----
 window.addEventListener('paste', async (e) => {
   const items = e.clipboardData?.items
   if (!items) return
@@ -554,7 +678,6 @@ window.addEventListener('paste', async (e) => {
   await importFiles(files, center.x, center.y)
 })
 
-// 크기를 미리 알 때(importFiles가 사전 검증한 경우) 중복 디코드 없이 추가
 async function placeImageWithSize(dataUrl: string, size: { w: number; h: number }, x: number, y: number) {
   const img: BoardImage = {
     id: genId(),
@@ -589,7 +712,7 @@ function imageSize(src: string): Promise<{ w: number; h: number }> {
   })
 }
 
-// 디버그용 전역 노출(board는 let이라 getter로 최신 참조 반환)
+// 디버그용 전역 노출
 ;(globalThis as unknown as { refboard: unknown }).refboard = {
   get board() {
     return board
@@ -606,6 +729,10 @@ function imageSize(src: string): Promise<{ w: number; h: number }> {
   zoomReset,
   bringToFront: () => applyZOrder(bringToFront),
   sendToBack: () => applyZOrder(sendToBack),
+  flip: flipSelected,
+  align: doAlign,
+  distribute: doDistribute,
+  normalize: doNormalize,
   toggleSnap: () => ((snapOn = !snapOn), snapOn),
   toggleMinimap: () => (minimap.toggle(), updateMinimap()),
   undo: doUndo,

@@ -1,6 +1,7 @@
 import { Application, Container, Graphics, Sprite, Texture, Assets, type FederatedPointerEvent } from 'pixi.js'
 import { AnimatedGIF } from '@pixi/gif'
 import type { BoardImage } from './board'
+import type { GizmoHandle } from './gizmo'
 
 // 화면 입력 1건을 "월드 좌표 + 적중 아이템"으로 정규화한 형태.
 export interface ScenePointer {
@@ -8,6 +9,7 @@ export interface ScenePointer {
   hitId: string | null // 클릭된 이미지 id (빈 곳이면 null)
   button: number
   shift: boolean
+  alt: boolean
 }
 
 export interface Rect {
@@ -26,6 +28,7 @@ export class Scene {
   private sprites = new Map<string, Sprite>()
   private selLayer = new Graphics() // 선택 외곽선
   private rubberLayer = new Graphics() // 러버밴드 사각형
+  private gizmoLayer = new Graphics() // 변형 기즈모 핸들
 
   // 입력 콜백 (main이 주입)
   onPointerDown?: (p: ScenePointer) => void
@@ -39,12 +42,13 @@ export class Scene {
     this.app.stage.addChild(this.world)
 
     // 오버레이 레이어: 항상 최상단, 포인터 이벤트는 통과(none)
-    for (const layer of [this.selLayer, this.rubberLayer]) {
+    for (const layer of [this.selLayer, this.rubberLayer, this.gizmoLayer]) {
       layer.eventMode = 'none'
       this.world.addChild(layer)
     }
     this.selLayer.zIndex = 1_000_000
     this.rubberLayer.zIndex = 1_000_001
+    this.gizmoLayer.zIndex = 1_000_002
 
     // stage 전역 포인터 입력 → 정규화 후 콜백으로 전달
     const stage = this.app.stage
@@ -62,7 +66,7 @@ export class Scene {
     const hitId =
       t && t !== this.app.stage && typeof t.label === 'string' && t.label.length > 0 ? t.label : null
     const w = this.world.toLocal(e.global)
-    return { world: { x: w.x, y: w.y }, hitId, button: e.button, shift: e.shiftKey }
+    return { world: { x: w.x, y: w.y }, hitId, button: e.button, shift: e.shiftKey, alt: e.altKey }
   }
 
   static async create(host: HTMLElement): Promise<Scene> {
@@ -120,7 +124,10 @@ export class Scene {
   // 보드 데이터의 변형값을 스프라이트에 반영(비파괴: 원본 텍스처 불변)
   applyTransform(sprite: Sprite, img: BoardImage) {
     sprite.position.set(img.transform.x, img.transform.y)
-    sprite.scale.set(img.transform.scale)
+    // flip은 scale 부호로 반영(비파괴). corners()는 abs(scale)이라 경계/기즈모 계산엔 영향 없음.
+    const sx = img.transform.scale * (img.transform.flipX ? -1 : 1)
+    const sy = img.transform.scale * (img.transform.flipY ? -1 : 1)
+    sprite.scale.set(sx, sy)
     sprite.rotation = img.transform.rotation
     sprite.alpha = img.opacity
     sprite.zIndex = img.z
@@ -202,6 +209,22 @@ export class Scene {
       const s = this.sprites.get(id)
       if (!s) continue
       this.selLayer.poly(this.corners(s)).stroke({ width: lw, color: 0x4aa3ff })
+    }
+  }
+
+  // 변형 기즈모 핸들 그리기(단일 선택 시). 핸들 크기는 화면 고정(줌 보정).
+  drawGizmo(handles: GizmoHandle[]) {
+    this.gizmoLayer.clear()
+    if (handles.length === 0) return
+    const z = this.world.scale.x
+    const r = 5 / z // 핸들 반경(화면 5px)
+    const lw = 1.5 / z
+    for (const h of handles) {
+      if (h.id === 'rotate') {
+        this.gizmoLayer.circle(h.x, h.y, r).fill({ color: 0xffffff }).stroke({ width: lw, color: 0x4aa3ff })
+      } else {
+        this.gizmoLayer.rect(h.x - r, h.y - r, r * 2, r * 2).fill({ color: 0xffffff }).stroke({ width: lw, color: 0x4aa3ff })
+      }
     }
   }
 

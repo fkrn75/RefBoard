@@ -6,6 +6,16 @@ export interface Transform {
   y: number
   scale: number    // 균등 스케일 배율
   rotation: number // 회전(라디안)
+  flipX?: boolean  // 좌우 뒤집기 (렌더 시 scale.x 부호 반전, 비파괴)
+  flipY?: boolean  // 상하 뒤집기 (렌더 시 scale.y 부호 반전, 비파괴)
+}
+
+// 비파괴 크롭: 원본 픽셀 기준 사각형(없으면 원본 전체). transform과 독립 — 크롭 리셋 ≠ 변형 리셋.
+export interface Crop {
+  x: number // 원본 픽셀 좌상단 x
+  y: number // 원본 픽셀 좌상단 y
+  w: number // 크롭 폭(원본 픽셀)
+  h: number // 크롭 높이(원본 픽셀)
 }
 
 export interface BoardImage {
@@ -14,6 +24,7 @@ export interface BoardImage {
   src: string                  // 임베드(data URL) 또는 링크(파일/웹 경로)
   natural: { w: number; h: number } // 원본 픽셀 크기
   transform: Transform
+  crop?: Crop                  // 선택적 비파괴 크롭(없으면 원본 전체)
   opacity: number
   locked: boolean
   z: number                    // 캔버스 내 레이어 순서
