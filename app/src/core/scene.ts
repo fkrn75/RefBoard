@@ -1,4 +1,5 @@
 import { Application, Container, Graphics, Sprite, Texture, Assets, type FederatedPointerEvent } from 'pixi.js'
+import { AnimatedGIF } from '@pixi/gif'
 import type { BoardImage } from './board'
 
 // 화면 입력 1건을 "월드 좌표 + 적중 아이템"으로 정규화한 형태.
@@ -91,8 +92,16 @@ export class Scene {
 
   // ---- 이미지 ----
   async addImage(img: BoardImage): Promise<Sprite> {
-    const texture: Texture = await Assets.load(img.src)
-    const sprite = new Sprite(texture)
+    let sprite: Sprite
+    if (Scene.isGif(img.src)) {
+      // GIF: src(data URL/경로)를 ArrayBuffer로 받아 독립 AnimatedGIF 생성(autoPlay·autoUpdate 기본 true → 자동 재생).
+      // Assets.load는 src 단위로 캐시해 같은 GIF가 한 인스턴스를 공유(복제 시 부모 충돌)하므로 fromBuffer로 매번 새로 만든다.
+      const buf = await (await fetch(img.src)).arrayBuffer()
+      sprite = AnimatedGIF.fromBuffer(buf)
+    } else {
+      const texture: Texture = await Assets.load(img.src)
+      sprite = new Sprite(texture)
+    }
     sprite.anchor.set(0.5) // 중심 기준 배치/스케일/회전
     sprite.eventMode = 'static' // 포인터 적중 대상
     sprite.cursor = 'grab'
@@ -101,6 +110,11 @@ export class Scene {
     this.world.addChild(sprite)
     this.sprites.set(img.id, sprite)
     return sprite
+  }
+
+  // src가 GIF인지 판별(data URL 또는 .gif 확장자)
+  private static isGif(src: string): boolean {
+    return /^data:image\/gif/i.test(src) || /\.gif(\?|$)/i.test(src)
   }
 
   // 보드 데이터의 변형값을 스프라이트에 반영(비파괴: 원본 텍스처 불변)
@@ -117,6 +131,11 @@ export class Scene {
   }
   allIds(): string[] {
     return [...this.sprites.keys()]
+  }
+
+  // 모든 스프라이트 커서 일괄 변경(이동 드래그 중 'grabbing' 등). 신규 스프라이트 기본값은 addImage의 'grab'.
+  setCursor(cursor: string) {
+    for (const s of this.sprites.values()) s.cursor = cursor
   }
 
   // 스프라이트 제거(텍스처/리소스 해제). board.items 정리는 호출측 책임.
@@ -156,6 +175,23 @@ export class Scene {
     const xs = c.map((p) => p.x)
     const ys = c.map((p) => p.y)
     return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) }
+  }
+
+  // 모든 아이템의 합집합 경계(전체 보기 fit-all용). 빈 캔버스면 null.
+  contentBounds(): { minX: number; minY: number; maxX: number; maxY: number } | null {
+    let minX = Infinity,
+      minY = Infinity,
+      maxX = -Infinity,
+      maxY = -Infinity
+    for (const id of this.sprites.keys()) {
+      const a = this.getItemAABB(id)
+      if (!a) continue
+      if (a.minX < minX) minX = a.minX
+      if (a.minY < minY) minY = a.minY
+      if (a.maxX > maxX) maxX = a.maxX
+      if (a.maxY > maxY) maxY = a.maxY
+    }
+    return Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null
   }
 
   // ---- 오버레이 그리기 ----
