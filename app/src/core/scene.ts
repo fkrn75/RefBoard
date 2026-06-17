@@ -119,6 +119,21 @@ export class Scene {
     return [...this.sprites.keys()]
   }
 
+  // 스프라이트 제거(텍스처/리소스 해제). board.items 정리는 호출측 책임.
+  removeImage(id: string): boolean {
+    const s = this.sprites.get(id)
+    if (!s) return false
+    s.destroy()
+    this.sprites.delete(id)
+    return true
+  }
+
+  // 보드 전체를 비우고 새 items로 다시 그림(저장본 열기·Undo 복원용).
+  async rebuild(items: BoardImage[]) {
+    for (const id of [...this.sprites.keys()]) this.removeImage(id)
+    for (const img of items) await this.addImage(img)
+  }
+
   // ---- 경계 계산 (회전·스케일 고려한 월드 4코너) ----
   private corners(s: Sprite): { x: number; y: number }[] {
     const hw = (s.texture.width / 2) * Math.abs(s.scale.x)
