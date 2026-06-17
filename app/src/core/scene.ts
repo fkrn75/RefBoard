@@ -280,4 +280,16 @@ export class Scene {
       .fill({ color: 0x4aa3ff, alpha: 0.12 })
       .stroke({ width: lw, color: 0x4aa3ff })
   }
+
+  // 내보내기용: 오버레이(선택 외곽선/러버밴드/기즈모/그리드)를 잠시 숨기고 복원 함수를 반환한다.
+  // renderer.extract는 받은 컨테이너를 그대로 렌더하므로, 추출 전 오버레이를 끄고 추출 후 복원해야
+  // 결과 이미지에 UI 요소가 섞이지 않는다. 반환된 함수를 추출 직후 반드시 호출할 것.
+  hideOverlays(): () => void {
+    const layers = [this.selLayer, this.rubberLayer, this.gizmoLayer, this.gridLayer]
+    const prev = layers.map((l) => l.visible)
+    for (const l of layers) l.visible = false
+    return () => {
+      layers.forEach((l, i) => (l.visible = prev[i]))
+    }
+  }
 }

@@ -2,7 +2,7 @@ import { Scene, type ScenePointer, type Rect } from './core/scene'
 import { createEmptyBoard, genId, type BoardImage, type BoardState, type Transform } from './core/board'
 import { Selection } from './core/selection'
 import { packImages } from './core/pack'
-import { saveBoard, loadBoardFile, pickRefbFile } from './core/io'
+import { loadBoardFile, pickRefbFile } from './core/io'
 import { History } from './core/history'
 import { Minimap } from './core/minimap'
 import { snapToNeighbors, snapDeltaToGrid, type AABB } from './core/snap'
@@ -13,6 +13,10 @@ import { cropRectFromDrag } from './core/crop'
 import { expandByGroup, planGroup, planUngroup } from './core/group'
 import { visibleGrid } from './core/grid'
 import { OpacityControl } from './core/opacity-control'
+import { packRefb } from './core/refb'
+import { exportSceneAll, exportSelection, renderThumbnail, downloadBlob } from './core/export-image'
+import { AutoSave } from './core/autosave'
+import { addRecent, setLastSession, getLastSession } from './core/recent'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -75,9 +79,23 @@ function commit() {
   setDirty(true)
 }
 window.addEventListener('beforeunload', (e) => {
+  // 종료 직전 현재 보드를 "마지막 세션"으로 저장(다음 실행에서 이어 열기). 동기 localStorage라 안전.
+  try {
+    setLastSession(board)
+  } catch {
+    // 용량 초과 등은 무시(마지막 세션은 "있으면 좋은" 편의 기능)
+  }
   if (!dirty) return
   e.preventDefault()
   e.returnValue = ''
+})
+
+// ---- 자동저장 / 크래시 복구 ----
+// 5분 주기로 현재 보드를 IndexedDB 스냅샷에 저장. getState는 항상 최신 board(let)를 클로저로 참조.
+// start()/복구 프롬프트 배선은 파일 하단의 부팅 초기화에서 처리(복구본 보존 순서 때문).
+const autosave = new AutoSave({
+  getState: () => board,
+  onError: (err) => console.warn('[autosave] 저장 실패', err),
 })
 
 // ---- 미니맵 / 스냅 / 그리드 / 투명도 ----
@@ -744,6 +762,9 @@ async function openBoard() {
     const state = await loadBoardFile(file)
     history.push(board)
     await restore(state)
+    // 최근 파일 등록 + 새 보드를 열었으니 이전 크래시 복구본 해제.
+    addRecent({ name: file.name, ts: Date.now(), size: file.size })
+    await autosave.clearRecovery()
     setDirty(false)
   } catch (err) {
     showToast(err instanceof Error ? err.message : '파일 열기 실패')
@@ -765,9 +786,64 @@ async function doRedo() {
   }
 }
 
-function save() {
-  saveBoard(board)
+async function save() {
+  // 썸네일(보드 미리보기)을 먼저 렌더 — 오버레이를 숨겨 UI가 섞이지 않게 한 뒤 추출.
+  let thumb: Uint8Array | undefined
+  try {
+    const restoreOverlays = scene.hideOverlays()
+    thumb = await renderThumbnail(scene.app.renderer, scene.world)
+    restoreOverlays()
+  } catch {
+    thumb = undefined // 썸네일 실패는 저장을 막지 않음
+  }
+  // 보드를 .refb(ZIP 컨테이너)로 패킹해 다운로드.
+  const blob = await packRefb(board, { thumbnail: thumb })
+  const base = (board.board.title || '').trim().replace(/\s+/g, '_') || 'board'
+  const name = base + '.refb'
+  downloadBlob(blob, name)
+  // 최근 파일 등록 + 크래시 복구 스냅샷 해제(정상 저장 완료) + dirty 해제.
+  addRecent({ name, ts: Date.now(), size: blob.size })
+  await autosave.clearRecovery()
   setDirty(false)
+  showToast('저장됨 · ' + name, true)
+}
+
+// ---- 내보내기(Export): 씬/선택 → PNG ----
+// 오버레이(선택/기즈모/그리드)를 숨긴 world를 추출해 UI가 결과 이미지에 섞이지 않게 한다.
+async function exportScene() {
+  const restoreOverlays = scene.hideOverlays()
+  try {
+    const blob = await exportSceneAll(scene.app.renderer, scene.world, { format: 'png', padding: 16 })
+    downloadBlob(blob, 'refboard-scene.png')
+    showToast('씬 전체를 PNG로 내보냈습니다', true)
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : '내보내기 실패')
+  } finally {
+    restoreOverlays()
+  }
+}
+async function exportSel() {
+  const ids = sel.values()
+  if (ids.length === 0) {
+    showToast('내보낼 항목을 선택하세요', true)
+    return
+  }
+  const restoreOverlays = scene.hideOverlays()
+  try {
+    const blob = await exportSelection(
+      scene.app.renderer,
+      scene.world,
+      ids,
+      (id) => scene.getSprite(id),
+      { format: 'png', padding: 8 },
+    )
+    downloadBlob(blob, 'refboard-selection.png')
+    showToast(`선택 ${ids.length}개를 PNG로 내보냈습니다`, true)
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : '내보내기 실패')
+  } finally {
+    restoreOverlays()
+  }
 }
 
 // ---- 키보드 단축키 ----
@@ -805,7 +881,13 @@ window.addEventListener('keydown', (e) => {
     zoomReset()
   } else if (ctrl && k === 's') {
     e.preventDefault()
-    save()
+    void save()
+  } else if (ctrl && e.shiftKey && k === 'e') {
+    e.preventDefault()
+    void exportSel()
+  } else if (ctrl && k === 'e') {
+    e.preventDefault()
+    void exportScene()
   } else if (ctrl && k === 'o') {
     e.preventDefault()
     void openBoard()
@@ -994,5 +1076,44 @@ function imageSize(src: string): Promise<{ w: number; h: number }> {
   undo: doUndo,
   redo: doRedo,
   save,
+  exportScene,
+  exportSel,
+  open: openBoard,
   getItem: (id: string) => board.items.find((i) => i.id === id),
 }
+
+// ---- 부팅 초기화: 크래시 복구 → 마지막 세션 이어 열기 → 자동저장 시작 ----
+// 순서가 중요하다: 자동저장 start()는 복구 처리가 끝난 뒤에 호출해야 복구본을 빈 스냅샷이 덮지 않는다.
+function loadLastSessionIfAny() {
+  if (board.items.length > 0) return // 이미 내용이 있으면 건드리지 않음
+  const last = getLastSession()
+  if (last && last.items.length > 0) {
+    void restore(last)
+    showToast('마지막 세션을 불러왔습니다', true)
+  }
+}
+void (async () => {
+  try {
+    if (await autosave.hasRecovery()) {
+      const ts = await autosave.getRecoveryTimestamp()
+      const when = ts ? new Date(ts).toLocaleString() : '이전'
+      if (window.confirm(`비정상 종료로 저장되지 않은 작업이 있습니다(${when}).\n복구하시겠습니까?`)) {
+        const recovered = await autosave.loadRecovery()
+        if (recovered) {
+          await restore(recovered)
+          setDirty(true) // 복구본은 아직 .refb로 저장되지 않은 상태
+          showToast('자동저장본을 복구했습니다', true)
+        }
+      } else {
+        await autosave.clearRecovery() // 복구 거부 → 스냅샷 비우고 마지막 세션으로 폴백
+        loadLastSessionIfAny()
+      }
+    } else {
+      loadLastSessionIfAny()
+    }
+  } catch (err) {
+    console.warn('[부팅 복구] 실패', err)
+  } finally {
+    autosave.start() // 복구 처리 후 주기 저장 시작
+  }
+})()

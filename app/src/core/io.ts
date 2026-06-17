@@ -1,78 +1,28 @@
-// 보드 입출력(.refb) — 데스크탑/웹 공통 직렬화 경로를 파일 다운로드·업로드로 연결한다.
-// 실제 직렬화 포맷은 board.ts(serialize/deserialize)가 단일 진실 공급원이며, 여기서는
-// 그 JSON 문자열을 브라우저 파일 시스템(.refb Blob ↔ File)으로만 옮긴다.
+// 보드 입출력(.refb) — refb.ts(ZIP 컨테이너)를 브라우저 파일 시스템(업로드/다운로드)으로 연결한다.
+// 실제 컨테이너 패킹/언패킹은 refb.ts가 담당하며, 여기서는 파일 선택·읽기와 스키마 검증만 맡는다.
+// (저장 경로는 썸네일 렌더가 필요해 main.ts가 packRefb/downloadBlob을 직접 조립한다 — io는 열기 전담.)
 
-import { serialize, deserialize, type BoardState } from './board'
-
-// .refb 확장자 + JSON MIME 타입. (.refb는 현재 평문 JSON; 추후 ZIP 패킹 시 이 모듈만 교체)
-const REFB_EXT = '.refb'
-const REFB_MIME = 'application/json'
-
-// 보드 제목 → 안전한 파일명 베이스로 변환 (공백→_, 비어 있으면 'board')
-function toFileBase(title: string | undefined): string {
-  const base = (title ?? '').trim().replace(/\s+/g, '_')
-  return base || 'board'
-}
-
-/**
- * 보드를 .refb 파일로 저장한다.
- * serialize(board) 결과 JSON을 Blob으로 만들어 임시 <a download>로 다운로드시킨다.
- * @param board     저장할 보드 상태
- * @param filename  파일명(선택). 미지정 시 board.board.title 기반 + .refb
- */
-export function saveBoard(board: BoardState, filename?: string): void {
-  const json = serialize(board)
-  const blob = new Blob([json], { type: REFB_MIME })
-  const url = URL.createObjectURL(blob)
-
-  // 파일명 결정: 명시값 우선, 없으면 보드 제목 기반. .refb 확장자는 항상 보장.
-  let name = filename ?? `${toFileBase(board.board?.title)}${REFB_EXT}`
-  if (!name.toLowerCase().endsWith(REFB_EXT)) name += REFB_EXT
-
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  // 일부 브라우저는 DOM에 붙어 있어야 click이 동작 → 붙였다 즉시 제거.
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-
-  // 다운로드 트리거 직후 objectURL 해제(메모리 누수 방지). click은 동기 처리됨.
-  URL.revokeObjectURL(url)
-}
+import { type BoardState } from './board'
+import { unpackRefb } from './refb'
 
 /**
  * 선택된 .refb 파일을 읽어 BoardState로 복원한다.
- * FileReader로 텍스트를 읽어 deserialize하고, schema 필드가 'refboard/'로
- * 시작하는지 검증한다(아니면 throw). 파싱 실패 시에도 throw.
+ * ZIP 컨테이너(신포맷)와 평문 JSON(구버전)을 unpackRefb가 자동 감지해 처리하며,
+ * 복원된 상태의 schema가 'refboard/'로 시작하는지 검증한다(아니면 throw).
  * @param file  사용자가 선택한 파일
  * @returns     복원된 보드 상태
  */
-export function loadBoardFile(file: File): Promise<BoardState> {
-  return new Promise<BoardState>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onerror = () =>
-      reject(new Error('파일을 읽을 수 없습니다.'))
-    reader.onload = () => {
-      try {
-        const text = String(reader.result ?? '')
-        const state = deserialize(text)
-        // 최소 유효성 검증: refboard 스키마인지 확인. 잘못된 .refb/타 파일 차단.
-        if (
-          !state ||
-          typeof state.schema !== 'string' ||
-          !state.schema.startsWith('refboard/')
-        ) {
-          reject(new Error('유효한 RefBoard(.refb) 파일이 아닙니다.'))
-          return
-        }
-        resolve(state)
-      } catch {
-        reject(new Error('보드 파일을 해석할 수 없습니다(손상되었거나 형식이 다름).'))
-      }
-    }
-    reader.readAsText(file)
-  })
+export async function loadBoardFile(file: File): Promise<BoardState> {
+  const state = await unpackRefb(file)
+  // 최소 유효성 검증: refboard 스키마인지 확인. 잘못된 .refb/타 파일 차단.
+  if (
+    !state ||
+    typeof state.schema !== 'string' ||
+    !state.schema.startsWith('refboard/')
+  ) {
+    throw new Error('유효한 RefBoard(.refb) 파일이 아닙니다.')
+  }
+  return state
 }
 
 /**
@@ -84,7 +34,7 @@ export function pickRefbFile(): Promise<File | null> {
   return new Promise<File | null>((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
-    input.accept = '.refb,application/json'
+    input.accept = '.refb,application/zip,application/json'
     input.onchange = () => {
       const file = input.files && input.files[0] ? input.files[0] : null
       resolve(file)

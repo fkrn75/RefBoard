@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@pixi/gif": "^3.0.1",
+    "fflate": "^0.8.3",
     "pixi.js": "^8.6.0"
   },
   "devDependencies": {
