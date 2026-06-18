@@ -26,9 +26,16 @@ import {
   saveRefbNative,
   openRefbNative,
   setAlwaysOnTop,
+  setAlwaysOnBottom,
   setDecorations,
   setClickThrough,
+  setWindowOpacity,
+  onOsFileDrop,
+  readDroppedFile,
 } from './core/tauri-bridge'
+import { createToolbar } from './core/toolbar'
+import { openSettings } from './core/settings-panel'
+import { createVirtualizer } from './core/virtualize'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -43,11 +50,44 @@ const sel = new Selection()
 const history = new History()
 let cam = { ...board.camera }
 
-// 선택이 바뀌면 선택 외곽선 + 기즈모 + 투명도 패널 다시 그림
+// ---- 데스크탑 UI 셸: 툴바 + 상태바(4.4) ----
+// 버튼 클릭은 모두 runAction(키맵과 동일 actionId)으로 흘려보내 단축키와 동작을 일원화한다.
+const toolbar = createToolbar({ onAction: (id) => runAction(id), isDesktop: isDesktop() })
+
+// ---- 대량 이미지 가상화(4.6): 가시영역 밖 GPU 텍스처 언로드 ----
+const virt = createVirtualizer({
+  getItems: () =>
+    board.items.map((im) => ({
+      id: im.id,
+      cx: im.transform.x,
+      cy: im.transform.y,
+      w: im.natural.w * im.transform.scale,
+      h: im.natural.h * im.transform.scale,
+    })),
+  getViewBounds: () => {
+    const tl = scene.screenToWorld(0, 0)
+    const br = scene.screenToWorld(host.clientWidth, host.clientHeight)
+    return { x: Math.min(tl.x, br.x), y: Math.min(tl.y, br.y), w: Math.abs(br.x - tl.x), h: Math.abs(br.y - tl.y) }
+  },
+  onLoad: (id) => {
+    const s = scene.getSprite(id)
+    if (s) s.visible = true
+  },
+  onUnload: (id) => {
+    const s = scene.getSprite(id)
+    if (s) {
+      s.visible = false
+      s.texture.source.unload() // GPU 텍스처만 해제(board.src 보존 → 다시 보이면 자동 재업로드)
+    }
+  },
+})
+
+// 선택이 바뀌면 선택 외곽선 + 기즈모 + 투명도 패널 다시 그림 + 상태바 갱신
 sel.onChange(() => {
   scene.drawSelection(sel.values(), lockedIdSet())
   refreshGizmo()
   syncOpacityControl()
+  toolbar.updateStatus({ selCount: sel.values().length, total: board.items.length })
 })
 
 // ---- UI: 로딩 인디케이터 / 토스트 / 저장상태(dirty) ----
@@ -193,6 +233,8 @@ function applyCam() {
   refreshGizmo() // 핸들 크기/오프셋도 줌 보정
   updateMinimap()
   drawGridIfOn() // 그리드도 보이는 영역 기준 재계산
+  toolbar.updateStatus({ zoom: cam.zoom, selCount: sel.values().length, total: board.items.length })
+  virt.update() // 카메라 이동/줌마다 가시영역 재평가 → 텍스처 로드/언로드
 }
 applyCam()
 
@@ -304,6 +346,7 @@ type DragState =
 let drag: DragState = null
 
 scene.onPointerDown = (p: ScenePointer) => {
+  if (canvasLocked) return // 캔버스 잠금 중에는 편집(선택/이동/변형) 차단 — 팬·줌·단축키는 유지
   if (p.button !== 0) return // 좌클릭만 (우클릭은 팬)
   // 0) 크롭 모드: 대상 이미지 기준 드래그 시작점(원본픽셀) 기록
   if (cropMode && cropTargetId) {
@@ -888,11 +931,18 @@ async function exportSel() {
 // 데스크탑 전용 윈도우 모드 액션(웹에선 no-op + 안내 토스트). 기본 액션 뒤에 합쳐 등록.
 const WINDOW_ACTIONS: Action[] = [
   { id: 'window.toggleAlwaysOnTop', label: '항상 위', group: '창', defaultCombo: 'Ctrl+Shift+A' },
+  { id: 'window.toggleAlwaysOnBottom', label: '항상 아래', group: '창', defaultCombo: 'Ctrl+Shift+B' },
   { id: 'window.toggleDecorations', label: '타이틀바 숨김/표시', group: '창', defaultCombo: 'Ctrl+Shift+D' },
   { id: 'window.toggleClickThrough', label: '마우스 통과(클릭스루)', group: '창', defaultCombo: 'Ctrl+Alt+T' },
+  { id: 'window.cycleOpacity', label: '창 불투명도 순환', group: '창', defaultCombo: 'Ctrl+Shift+O' },
+  { id: 'window.toggleLock', label: '캔버스 잠금', group: '창', defaultCombo: 'Ctrl+Shift+L' },
+]
+// 설정 패널(테마·단축키) 열기 — '앱' 그룹.
+const APP_EXTRA_ACTIONS: Action[] = [
+  { id: 'app.settings', label: '설정', group: '앱', defaultCombo: 'Ctrl+,' },
 ]
 // 단축키 액션 카탈로그 등록(저장된 사용자 재바인딩도 이때 함께 로드된다).
-registerActions([...DEFAULT_ACTIONS, ...WINDOW_ACTIONS])
+registerActions([...DEFAULT_ACTIONS, ...WINDOW_ACTIONS, ...APP_EXTRA_ACTIONS])
 
 // ---- 윈도우 모드 토글(데스크탑 전용 · PureRef 정체성) ----
 let winAlwaysOnTop = false
@@ -915,6 +965,38 @@ async function toggleClickThrough() {
   winClickThrough = !winClickThrough
   await setClickThrough(winClickThrough)
   showToast(winClickThrough ? '마우스 통과 켜짐 · 단축키로 해제' : '마우스 통과 꺼짐', true)
+}
+// 항상 아래(바탕화면 위 레퍼런스). 항상 위와 배타적으로 토글.
+let winAlwaysOnBottom = false
+async function toggleAlwaysOnBottom() {
+  if (!isDesktop()) return showToast('데스크탑 앱에서만 사용할 수 있습니다', true)
+  winAlwaysOnBottom = !winAlwaysOnBottom
+  await setAlwaysOnBottom(winAlwaysOnBottom)
+  if (winAlwaysOnBottom && winAlwaysOnTop) {
+    // 위·아래 동시 불가 → 위를 끈다.
+    winAlwaysOnTop = false
+    await setAlwaysOnTop(false)
+    toolbar.setActive('window.toggleAlwaysOnTop', false)
+  }
+  toolbar.setActive('window.toggleAlwaysOnBottom', winAlwaysOnBottom)
+  showToast(winAlwaysOnBottom ? '항상 아래 켜짐' : '항상 아래 꺼짐', true)
+}
+// 창 불투명도 순환(100→85→65→40). Rust 커스텀 커맨드 set_window_opacity로 적용.
+const OPACITY_STEPS = [1, 0.85, 0.65, 0.4]
+let opacityIdx = 0
+async function cycleOpacity() {
+  if (!isDesktop()) return showToast('데스크탑 앱에서만 사용할 수 있습니다', true)
+  opacityIdx = (opacityIdx + 1) % OPACITY_STEPS.length
+  const o = OPACITY_STEPS[opacityIdx]
+  await setWindowOpacity(o)
+  showToast(`창 불투명도 ${Math.round(o * 100)}%`, true)
+}
+// 캔버스 잠금: 편집/이동 입력을 막아 레이아웃 고정(보기·단축키는 유지).
+let canvasLocked = false
+function toggleCanvasLock() {
+  canvasLocked = !canvasLocked
+  toolbar.setActive('window.toggleLock', canvasLocked)
+  showToast(canvasLocked ? '캔버스 잠금 · 편집/이동 차단' : '캔버스 잠금 해제', true)
 }
 
 // 테마 변경 시 캔버스 배경 + 그리드 + 선택 외곽선을 새 색으로 다시 그린다.
@@ -987,8 +1069,13 @@ function runAction(id: string) {
     case 'app.commandPalette': openCommandPalette(); break
     // 창(데스크탑 전용)
     case 'window.toggleAlwaysOnTop': void toggleAlwaysOnTop(); break
+    case 'window.toggleAlwaysOnBottom': void toggleAlwaysOnBottom(); break
     case 'window.toggleDecorations': void toggleDecorations(); break
     case 'window.toggleClickThrough': void toggleClickThrough(); break
+    case 'window.cycleOpacity': void cycleOpacity(); break
+    case 'window.toggleLock': toggleCanvasLock(); break
+    // 앱(설정 패널)
+    case 'app.settings': openSettings(); break
   }
 }
 
@@ -1176,3 +1263,30 @@ void (async () => {
     autosave.start() // 복구 처리 후 주기 저장 시작
   }
 })()
+
+// ---- OS 네이티브 파일 드롭(데스크탑 전용 · 4.2) ----
+// 웹 드롭(host 'drop')과 달리 Tauri는 실제 파일 절대경로를 준다. 경로로 읽어 이미지로 임포트.
+if (isDesktop()) {
+  const DROP_MIME: Record<string, string> = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+    gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', avif: 'image/avif',
+  }
+  void onOsFileDrop(async (paths) => {
+    const imgs = paths.filter((p) => /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(p))
+    if (imgs.length === 0) return
+    const center = scene.screenToWorld(host.clientWidth / 2, host.clientHeight / 2)
+    const files: File[] = []
+    for (const p of imgs) {
+      try {
+        const { bytes, name } = await readDroppedFile(p)
+        const ext = (name.split('.').pop() || '').toLowerCase()
+        // Uint8Array → ArrayBuffer(정확한 구간 복사). TS5.7 BlobPart 타입 엄격성(SharedArrayBuffer 배제) 회피.
+        const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+        files.push(new File([ab], name, { type: DROP_MIME[ext] || 'application/octet-stream' }))
+      } catch (err) {
+        console.warn('[OS drop]', p, err)
+      }
+    }
+    if (files.length) await importFiles(files, center.x, center.y)
+  })
+}

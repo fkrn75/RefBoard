@@ -65,3 +65,34 @@ export async function setClickThrough(on: boolean): Promise<void> {
   const { getCurrentWindow } = await import('@tauri-apps/api/window')
   await getCurrentWindow().setIgnoreCursorEvents(on)
 }
+
+// 항상 아래(다른 창 뒤로 — 바탕화면 위 레퍼런스용). 항상위와 배타적으로 토글하는 게 일반적.
+export async function setAlwaysOnBottom(on: boolean): Promise<void> {
+  const { getCurrentWindow } = await import('@tauri-apps/api/window')
+  await getCurrentWindow().setAlwaysOnBottom(on)
+}
+
+// 창 불투명도(0~1). Tauri 코어에 set-opacity 권한이 없어 Rust 커스텀 커맨드 set_window_opacity로 위임한다.
+// Windows는 레이어드 윈도우 알파로 적용, 타 OS/웹은 무시(폴백). 완전 투명으로 창이 사라지는 사고를 막아 하한 0.2.
+export async function setWindowOpacity(opacity: number): Promise<void> {
+  const o = Math.max(0.2, Math.min(1, opacity))
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('set_window_opacity', { opacity: o })
+}
+
+// OS 네이티브 파일 드롭. 웹 드롭과 달리 실제 파일 절대경로를 받는다(.refb·이미지 열기용).
+// 반환값은 구독 해제 함수. 드롭 시 콜백에 경로 배열을 전달한다.
+export async function onOsFileDrop(cb: (paths: string[]) => void): Promise<() => void> {
+  const { getCurrentWindow } = await import('@tauri-apps/api/window')
+  return await getCurrentWindow().onDragDropEvent((e) => {
+    if (e.payload.type === 'drop') cb(e.payload.paths)
+  })
+}
+
+// OS 드롭으로 받은 절대경로의 파일을 읽어 바이트로 반환(확장자 필터). 이미지/.refb 임포트에 사용.
+export async function readDroppedFile(path: string): Promise<{ bytes: Uint8Array; name: string }> {
+  const { readFile } = await import('@tauri-apps/plugin-fs')
+  const bytes = await readFile(path)
+  const name = path.replace(/^.*[\\/]/, '')
+  return { bytes, name }
+}
