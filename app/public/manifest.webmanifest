@@ -3,7 +3,7 @@
   "short_name": "RefBoard",
   "description": "RefBoard 레퍼런스 보드 읽기 전용 웹 뷰어",
   "lang": "ko",
-  "start_url": "/",
+  "start_url": "/viewer.html",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",

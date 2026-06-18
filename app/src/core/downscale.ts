@@ -223,8 +223,19 @@ export async function downscaleIfLarge(src: ImageSource, opts: DownscaleOptions 
     }
     try {
       const dataUrl = await sourceToDataURL(src)
-      const w = decoded?.w ?? 0
-      const h = decoded?.h ?? 0
+      let w = decoded?.w ?? 0
+      let h = decoded?.h ?? 0
+      // 디코드 폴백에서 치수를 모르면(0×0) dataURL을 <img>로 한 번 더 측정한다.
+      // 0×0 자연크기로 배치되면 렌더/바운즈/pack 계산이 깨지므로 방지(bug-io P1).
+      if (w === 0 || h === 0) {
+        try {
+          const probe = await loadImage(dataUrl)
+          w = probe.naturalWidth
+          h = probe.naturalHeight
+        } catch {
+          /* 측정 실패 → 0 유지(호출측이 0×0을 걸러낸다) */
+        }
+      }
       return { dataUrl, width: w, height: h, original: { w, h }, downscaled: false, ratio: 1 }
     } catch (err2) {
       // dataURL 변환마저 실패 — src가 이미 문자열이면 그거라도 반환, 아니면 재throw

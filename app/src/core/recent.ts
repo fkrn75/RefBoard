@@ -110,7 +110,7 @@ export function clearLastSession(): void {
 function isRecentEntry(v: unknown): v is RecentEntry {
   if (!v || typeof v !== 'object') return false
   const o = v as Record<string, unknown>
-  if (typeof o.name !== 'string' || typeof o.ts !== 'number') return false
+  if (typeof o.name !== 'string' || typeof o.ts !== 'number' || !Number.isFinite(o.ts)) return false
   if (o.size !== undefined && typeof o.size !== 'number') return false
   return true
 }

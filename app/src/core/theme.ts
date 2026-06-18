@@ -68,7 +68,7 @@ const PRESETS: Record<ThemeName, ThemeTokens> = {
     grid: '#2c2c2c',
     gridMajor: '#3a3a3a',
     text: '#e6e6e6',
-    textDim: '#777777',
+    textDim: '#9a9a9a', // 보조 텍스트도 WCAG AA(>=4.5:1) 충족하도록 상향(기존 #777=3.42:1, a11y P2)
     accent: '#4aa3ff',
     accentFg: '#ffffff',
     warn: '#ff9800',
@@ -84,7 +84,7 @@ const PRESETS: Record<ThemeName, ThemeTokens> = {
     grid: '#e0e0e0',
     gridMajor: '#cccccc',
     text: '#1e1e1e',
-    textDim: '#888888',
+    textDim: '#6a6a6a', // 보조 텍스트 WCAG AA 충족(기존 #888=3.54:1 미달, a11y P2)
     accent: '#2f7fe0',
     accentFg: '#ffffff',
     warn: '#e06c00',

@@ -176,7 +176,9 @@ export class Scene {
   // 보드 전체를 비우고 새 items로 다시 그림(저장본 열기·Undo 복원용).
   async rebuild(items: BoardImage[]) {
     for (const id of [...this.sprites.keys()]) this.removeImage(id)
-    for (const img of items) await this.addImage(img)
+    // 병렬 디코드 — 순차 await는 열기·Undo·Redo에서 전체 재디코드가 직렬이라 대량 보드에서 느리다(perf P2).
+    // z 순서는 sprite.zIndex(applyTransform) + world.sortableChildren이 보장하므로 추가 순서는 무관하다.
+    await Promise.all(items.map((img) => this.addImage(img)))
   }
 
   // ---- 경계 계산 (회전·스케일 고려한 월드 4코너) ----

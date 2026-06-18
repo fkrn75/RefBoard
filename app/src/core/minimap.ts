@@ -141,6 +141,11 @@ export class Minimap {
     this.setVisible(!this.visible)
   }
 
+  // 현재 표시 여부 — main의 updateMinimap이 숨김 상태면 contentBounds() O(n) 계산을 생략하는 데 쓴다(perf P1).
+  isVisible(): boolean {
+    return this.visible
+  }
+
   // 리스너 해제 + canvas 제거.
   destroy(): void {
     this.canvas.removeEventListener('pointerdown', this.handlePointerDown)

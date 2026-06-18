@@ -104,7 +104,7 @@ export function buildSelfContainedHtml(board: BoardState, opts?: BuildHtmlOption
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="generator" content="RefBoard">
 <title>${escapeHtml(title)}</title>
 <style>
@@ -142,6 +142,6 @@ export function downloadHtml(html: string, filename: string): void {
   document.body.appendChild(a)
   a.click()
   a.remove()
-  // click은 동기 처리되므로 직후 해제해도 안전(메모리 누수 방지).
-  URL.revokeObjectURL(url)
+  // 대용량 다운로드가 동기 revoke로 취소되지 않도록 다음 틱에 해제(bug-io P3).
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

@@ -166,7 +166,7 @@ function refilter(query: string): void {
     filtered = allActions.slice()
   } else {
     filtered = allActions.filter((a) => {
-      const hay = (a.label + ' ' + (a.group ?? '')).toLowerCase()
+      const hay = (a.label + ' ' + (a.group ?? '') + ' ' + a.id).toLowerCase()
       return hay.includes(q)
     })
   }

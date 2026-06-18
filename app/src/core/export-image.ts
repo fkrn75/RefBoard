@@ -257,8 +257,8 @@ export function downloadBlob(blob: Blob, filename: string): void {
   document.body.appendChild(a)
   a.click()
   a.remove()
-  // click은 동기 처리되므로 직후 해제해도 안전(메모리 누수 방지).
-  URL.revokeObjectURL(url)
+  // 일부 브라우저는 click 직후 동기 revoke 시 대용량 다운로드가 취소될 수 있어 다음 틱에 해제(bug-io P3).
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 /**

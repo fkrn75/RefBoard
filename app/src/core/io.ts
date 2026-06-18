@@ -45,19 +45,24 @@ export function pickRefbFile(): Promise<File | null> {
     const input = document.createElement('input')
     input.type = 'file'
     input.accept = '.refb,application/zip,application/json'
-    input.onchange = () => {
-      const file = input.files && input.files[0] ? input.files[0] : null
-      resolve(file)
+    // resolve는 단 한 번만(onchange·cancel·focus 폴백이 경합해도 첫 결과만 채택 — bug-io P1).
+    let settled = false
+    const done = (f: File | null) => {
+      if (settled) return
+      settled = true
+      resolve(f)
     }
-    // 취소(파일 미선택 후 닫기)는 표준 onchange 미발생 → 안전한 폴백을 둔다.
-    // window 포커스 복귀 후에도 선택이 없으면 null로 간주.
+    input.onchange = () => done(input.files && input.files[0] ? input.files[0] : null)
+    // 표준 cancel 이벤트(지원 브라우저)는 취소를 정확히 알려준다 → 폴백보다 우선.
+    input.oncancel = () => done(null)
+    // 폴백: 포커스 복귀 후에도 onchange/cancel이 없으면 취소로 간주.
+    // settled 플래그 덕에 느린 디스크에서 onchange가 늦게 와도 "취소 오판"하지 않는다(500ms 여유).
     window.addEventListener(
       'focus',
       () => {
-        // 다음 틱에 onchange가 먼저 처리될 기회를 준 뒤 미선택이면 null.
         setTimeout(() => {
-          if (!input.files || input.files.length === 0) resolve(null)
-        }, 300)
+          if (!input.files || input.files.length === 0) done(null)
+        }, 500)
       },
       { once: true },
     )

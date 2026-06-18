@@ -27,6 +27,8 @@ let imgEl: HTMLImageElement | null = null // 현재 표시 중인 이미지
 let captionEl: HTMLDivElement | null = null // 하단 캡션(제목 + 순번)
 let prevBtn: HTMLButtonElement | null = null
 let nextBtn: HTMLButtonElement | null = null
+let closeBtn: HTMLButtonElement | null = null // 닫기 버튼(포커스 트랩·초기 포커스 대상 — a11y P1)
+let triggerEl: HTMLElement | null = null // 열기 직전 포커스를 둔 요소(닫을 때 복원 — a11y P1)
 
 let items: LightboxItem[] = [] // 열 때 전달받은 전체 목록
 let index = 0 // 현재 보고 있는 항목 위치(items 기준)
@@ -39,6 +41,10 @@ let onDocKeydown: ((e: KeyboardEvent) => void) | null = null
 const ZOOM_MIN = 0.2
 const ZOOM_MAX = 8
 const ZOOM_STEP = 1.15 // 휠 한 칸당 곱/나눗셈 배율
+
+// 모션 최소화 설정(prefers-reduced-motion) 존중 — 줌 트랜지션을 끈다(a11y P2).
+const reduceMotion =
+  typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
 
 // ---- 공개 API ----
 
@@ -60,8 +66,12 @@ export function openLightbox(list: LightboxItem[], startIndex: number): void {
     show(index)
     return
   }
+  // 닫을 때 포커스를 되돌리기 위해 열기 직전 활성 요소를 보관(a11y P1).
+  triggerEl = (document.activeElement as HTMLElement | null) ?? null
   buildDom()
   show(index)
+  // 열리면 닫기 버튼으로 포커스를 옮긴다(키보드/스크린리더 — a11y P1).
+  closeBtn?.focus()
 }
 
 // 라이트박스를 닫고 DOM·전역 리스너를 정리한다(중복 호출 안전).
@@ -77,9 +87,13 @@ export function closeLightbox(): void {
   captionEl = null
   prevBtn = null
   nextBtn = null
+  closeBtn = null
   items = []
   index = 0
   zoom = 1
+  // 포커스를 열기 전 요소로 복원(a11y P1).
+  triggerEl?.focus?.()
+  triggerEl = null
 }
 
 // ---- DOM 구성 ----
@@ -112,17 +126,21 @@ function buildDom(): void {
 
   // 이미지: 화면에 맞춰 보이고(휠 줌으로 확대), 더블클릭으로 줌 리셋.
   const img = document.createElement('img')
-  img.alt = ''
+  img.alt = '' // 실제 대체 텍스트는 show()에서 항목별로 채운다(a11y P1)
   img.draggable = false
   img.style.cssText = [
     'max-width:92vw',
     'max-height:86vh',
     'object-fit:contain',
     'transform-origin:center center',
-    'transition:transform .08s ease-out',
+    reduceMotion ? 'transition:none' : 'transition:transform .08s ease-out',
     'cursor:zoom-in',
     'box-shadow:0 12px 48px rgba(0,0,0,.6)',
   ].join(';')
+  // 로드 실패(원격/로컬 링크의 오프라인·404) 시 빈 오버레이에 갇히지 않게 안내(a11y P1).
+  img.addEventListener('error', () => {
+    if (captionEl) captionEl.textContent = `이미지를 불러올 수 없습니다 · ${index + 1} / ${items.length}`
+  })
   img.addEventListener('mousedown', (e) => e.stopPropagation())
   img.addEventListener('dblclick', (e) => {
     e.preventDefault()
@@ -162,8 +180,8 @@ function buildDom(): void {
     'position:absolute',
     'top:16px',
     'right:16px',
-    'width:40px',
-    'height:40px',
+    'width:44px',
+    'height:44px',
     'display:flex',
     'align-items:center',
     'justify-content:center',
@@ -219,6 +237,7 @@ function buildDom(): void {
   captionEl = caption
   prevBtn = prev
   nextBtn = next
+  closeBtn = close
 }
 
 // 좌/우 가장자리에 붙는 원형 네비 버튼을 만든다(공통 스타일).
@@ -259,6 +278,8 @@ function show(i: number): void {
   if (!item || !imgEl) return
   index = i
   imgEl.src = item.src
+  // 의미 있는 대체 텍스트(제목 또는 순번) — 스크린리더·로드 실패 대비(a11y P1).
+  imgEl.alt = item.title ? item.title : `이미지 ${i + 1} / ${items.length}`
   resetZoom() // 항목이 바뀌면 줌을 맞춤 상태로 되돌린다.
   updateCaption()
   updateNavButtons()
@@ -336,6 +357,20 @@ function handleKeydown(e: KeyboardEvent): void {
       e.stopPropagation()
       go(1)
       break
+    case 'Tab': {
+      // 포커스 트랩 — Tab이 배경(캔버스/메타/숨김 목록)으로 새지 않게 오버레이 내부에서 순환(a11y P1).
+      e.preventDefault()
+      e.stopPropagation()
+      const f = [prevBtn, nextBtn, closeBtn].filter(
+        (b): b is HTMLButtonElement => !!b && b.style.display !== 'none',
+      )
+      if (f.length === 0) break
+      const cur = document.activeElement as HTMLElement | null
+      const at = cur ? f.indexOf(cur as HTMLButtonElement) : -1
+      const nextIdx = e.shiftKey ? (at <= 0 ? f.length - 1 : at - 1) : (at >= f.length - 1 ? 0 : at + 1)
+      f[nextIdx].focus()
+      break
+    }
     default:
       break
   }

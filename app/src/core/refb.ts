@@ -170,8 +170,13 @@ export async function packRefb(
     let decoded: DecodedDataUrl | null = null
 
     if (isDataUrl(src)) {
-      // data URL → 항상 임베드.
-      decoded = decodeDataUrl(src)
+      // data URL → 항상 임베드. base64가 아닌 data URL(SVG 텍스트 등)은 decodeDataUrl이 throw하므로
+      // try/catch로 감싸 저장 전체가 실패하지 않게 한다(링크 유지로 폴백 — bug-io P2).
+      try {
+        decoded = decodeDataUrl(src)
+      } catch {
+        decoded = null
+      }
     } else if (isRemoteUrl(src)) {
       // 원격 URL → 항상 임베드(네트워크에서 받아옴). 실패 시 링크 유지로 폴백.
       try {
@@ -276,7 +281,9 @@ export async function unpackRefb(blob: Blob): Promise<BoardState> {
   const state = deserialize(strFromU8(boardJson))
 
   // assets/ 자산을 data URL로 다시 인라인해 src를 복원(기존 렌더 경로 호환).
-  for (const item of state.items) {
+  // 손상된 board.json(items가 배열이 아님)이면 순회가 "is not iterable"로 크래시하므로 가드한다(bug-io P2).
+  // 스키마 유효성(refboard/...)은 호출측 io.ts가 별도 검증한다.
+  if (Array.isArray(state.items)) for (const item of state.items) {
     if (!isImageItem(item)) continue
     const src = item.src
     // ZIP 내부 상대경로(assets/...)로 치환돼 있던 것만 복원 대상.

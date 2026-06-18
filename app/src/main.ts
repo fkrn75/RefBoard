@@ -9,7 +9,7 @@ import { snapToNeighbors, snapDeltaToGrid, type AABB } from './core/snap'
 import { bringToFront, sendToBack, bringForward, sendBackward, normalizeZ } from './core/zorder'
 import { alignEdge, distribute, normalizeSize, type AlignItem } from './core/align'
 import { handlePositions, hitTest, scaleFromHandle, rotateFromPointer, type HandleId } from './core/gizmo'
-import { cropRectFromDrag } from './core/crop'
+import { cropRectFromDrag, croppedSize } from './core/crop'
 import { expandByGroup, planGroup, planUngroup } from './core/group'
 import { visibleGrid } from './core/grid'
 import { OpacityControl } from './core/opacity-control'
@@ -198,6 +198,8 @@ function syncOpacityControl() {
   opacityCtl.show(im ? im.opacity : 1)
 }
 function updateMinimap() {
+  // 미니맵이 숨김이면 contentBounds()의 O(n) 계산 자체를 생략(기본값이 숨김 — perf P1).
+  if (!minimap.isVisible()) return
   minimap.update(scene.contentBounds(), cam, host.clientWidth, host.clientHeight)
 }
 minimap.onJump = (wx, wy) => {
@@ -212,7 +214,8 @@ function refreshGizmo() {
   if (ids.length === 1) {
     const im = board.items.find((i) => i.id === ids[0])
     if (im && !im.locked) {
-      scene.drawGizmo(handlePositions(im.transform, im.natural, 30 / cam.zoom))
+      // 크롭된 이미지는 표시 크기(croppedSize)로 기즈모를 그려 선택 외곽선(texture.frame 기준)과 일치시킨다(bug-core P1).
+      scene.drawGizmo(handlePositions(im.transform, croppedSize(im.crop, im.natural), 30 / cam.zoom))
       return
     }
   }
@@ -227,15 +230,26 @@ function afterEdit() {
 }
 
 // ---- 카메라 ----
-function applyCam() {
-  scene.setCamera(cam.x, cam.y, cam.zoom)
-  board.camera = { ...cam }
+// 팬/줌은 raw 포인터/휠 이벤트마다 applyCam을 부르므로(초당 수십~수백 회) 무거운 재계산을
+// rAF 1회로 코얼레싱한다. GPU 카메라 반영만 즉시 하고, 나머지(외곽선·기즈모·미니맵·그리드·
+// 상태바·가상화)는 다음 프레임에 한 번만 묶어 처리해 대량 보드의 팬/줌 프리즈를 막는다(perf P1).
+let camRafId = 0
+function applyCamHeavy() {
   scene.drawSelection(sel.values(), lockedIdSet()) // 줌 변화에 맞춰 외곽선 두께(줌 보정) 갱신
   refreshGizmo() // 핸들 크기/오프셋도 줌 보정
   updateMinimap()
   drawGridIfOn() // 그리드도 보이는 영역 기준 재계산
   toolbar.updateStatus({ zoom: cam.zoom, selCount: sel.values().length, total: board.items.length })
-  virt.update() // 카메라 이동/줌마다 가시영역 재평가 → 텍스처 로드/언로드
+  virt.update() // 가시영역 재평가 → 텍스처 로드/언로드
+}
+function applyCam() {
+  scene.setCamera(cam.x, cam.y, cam.zoom) // 즉시 반영(시각 반응성)
+  board.camera = { ...cam }
+  if (camRafId) return // 이번 프레임 갱신이 이미 예약됨 → 중복 작업 생략(코얼레싱)
+  camRafId = requestAnimationFrame(() => {
+    camRafId = 0
+    applyCamHeavy()
+  })
 }
 applyCam()
 
@@ -276,11 +290,14 @@ function zoomReset() {
   applyCam()
 }
 
-// 보드 통째 복원(열기·undo·redo 공용)
-async function restore(state: BoardState) {
+// 보드 통째 복원(열기·undo·redo 공용).
+// keepCamera=true면 현재 카메라를 유지 — undo/redo가 편집과 무관하게 화면을 점프시키지 않게 한다(bug-core P1).
+// 열기/크래시 복구는 저장된 카메라를 복원해야 자연스러우므로 기본은 복원이다.
+async function restore(state: BoardState, opts?: { keepCamera?: boolean }) {
+  const keep = opts?.keepCamera ? { ...cam } : null
   board = state
   await scene.rebuild(board.items)
-  cam = { ...board.camera }
+  cam = keep ?? { ...board.camera }
   applyCam()
   sel.clear()
   hint.style.display = board.items.length > 0 ? 'none' : ''
@@ -362,7 +379,7 @@ scene.onPointerDown = (p: ScenePointer) => {
     const gid = sel.values()[0]
     const gim = board.items.find((i) => i.id === gid)
     if (gim && !gim.locked) {
-      const handles = handlePositions(gim.transform, gim.natural, 30 / cam.zoom)
+      const handles = handlePositions(gim.transform, croppedSize(gim.crop, gim.natural), 30 / cam.zoom)
       const hit = hitTest(p.world, handles, 9 / cam.zoom)
       if (hit) {
         drag = { mode: 'gizmo', handle: hit, id: gid, t0: { ...gim.transform }, start: p.world, committed: false }
@@ -414,7 +431,7 @@ scene.onPointerMove = (p: ScenePointer) => {
     if (gd.handle === 'rotate') {
       im.transform.rotation = rotateFromPointer(gd.t0, gd.start, p.world, p.shift).rotation
     } else {
-      const r = scaleFromHandle(gd.handle, gd.t0, im.natural, gd.start, p.world, { centered: p.alt })
+      const r = scaleFromHandle(gd.handle, gd.t0, croppedSize(im.crop, im.natural), gd.start, p.world, { centered: p.alt })
       im.transform.scale = r.scale
       im.transform.x = r.x
       im.transform.y = r.y
@@ -564,9 +581,11 @@ function packAll() {
   const targets = sel.size > 1 ? sel.values() : scene.allIds()
   if (targets.length < 2) return
   commit()
-  const items = targets.map((id) => {
-    const im = board.items.find((i) => i.id === id)!
-    return { id, w: im.natural.w * im.transform.scale, h: im.natural.h * im.transform.scale }
+  const items = targets.flatMap((id) => {
+    const im = board.items.find((i) => i.id === id)
+    // scene-board desync로 board에 없는 id면 건너뛴다(비널 단언 제거 — bug-core P3).
+    if (!im) return []
+    return [{ id, w: im.natural.w * im.transform.scale, h: im.natural.h * im.transform.scale }]
   })
   const aspect = Math.max(0.1, host.clientWidth / host.clientHeight)
   const pos = packImages(items, { aspect, padding: 16 })
@@ -704,6 +723,13 @@ function pixelToWorld(im: BoardImage, px: number, py: number): { x: number; y: n
 function enterCropMode() {
   if (sel.size !== 1) {
     showToast('크롭은 이미지 1개만 선택했을 때 가능합니다', true)
+    return
+  }
+  const target = board.items.find((i) => i.id === sel.values()[0])
+  // 회전된 이미지는 화면축 드래그 사각형과 원본픽셀 크롭이 어긋나므로 차단한다(bug-core P1).
+  // (변형 리셋으로 회전을 0으로 되돌린 뒤 크롭하면 된다.)
+  if (target && target.transform.rotation !== 0) {
+    showToast('회전된 이미지는 크롭할 수 없습니다 · 변형 리셋(Ctrl+Shift+T) 후 시도하세요', true)
     return
   }
   cropMode = true
@@ -847,14 +873,14 @@ async function openBoard() {
 async function doUndo() {
   const prev = history.undo(board)
   if (prev) {
-    await restore(prev)
+    await restore(prev, { keepCamera: true }) // undo는 객체 상태만 되돌리고 카메라는 유지(bug-core P1)
     setDirty(true)
   }
 }
 async function doRedo() {
   const next = history.redo(board)
   if (next) {
-    await restore(next)
+    await restore(next, { keepCamera: true })
     setDirty(true)
   }
 }
@@ -1140,6 +1166,8 @@ async function importFiles(files: File[], baseX: number, baseY: number) {
       // 대형 이미지는 자동 다운스케일(메모리·.refb 크기·렌더 성능 절감). 긴 변 4096px 초과분만 줄인다.
       // downscaleIfLarge가 결과 픽셀 크기를 함께 반환하므로 별도 imageSize 호출은 불필요.
       const ds = await downscaleIfLarge(url, { maxEdge: 4096 })
+      // 치수를 끝내 못 구한 0×0 결과는 배치하지 않는다(렌더/바운즈/pack 깨짐 방지 — bug-io P1).
+      if (ds.width <= 0 || ds.height <= 0) throw new Error('이미지 크기를 확인할 수 없습니다')
       valid.push({ url: ds.dataUrl, size: { w: ds.width, h: ds.height } })
     } catch {
       failed++

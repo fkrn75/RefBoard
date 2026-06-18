@@ -66,6 +66,7 @@ export function deserialize(json: string): BoardState {
 // 짧은 고유 ID 생성 (crypto 우선, 미지원 환경은 폴백)
 export function genId(): string {
   const c = globalThis.crypto
-  if (c && 'randomUUID' in c) return c.randomUUID().slice(0, 8)
-  return Math.random().toString(36).slice(2, 10)
+  // 12자리 사용 — assets/<id> 자산 경로·공유 id의 충돌 위험 완화(8자리는 엔트로피 부족, bug-io P2).
+  if (c && 'randomUUID' in c) return c.randomUUID().replace(/-/g, '').slice(0, 12)
+  return Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 6)
 }

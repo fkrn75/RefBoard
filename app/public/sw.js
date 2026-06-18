@@ -10,7 +10,7 @@
 // precache 대상에 넣지 않고 런타임 캐시(cache-first)로 자연히 채운다.
 
 // 캐시 버전 — 배포 시 올리면 옛 캐시가 정리된다.
-const CACHE_VERSION = 'v1'
+const CACHE_VERSION = 'v2'
 const SHELL_CACHE = `refboard-shell-${CACHE_VERSION}`
 const RUNTIME_CACHE = `refboard-runtime-${CACHE_VERSION}`
 
@@ -18,6 +18,7 @@ const RUNTIME_CACHE = `refboard-runtime-${CACHE_VERSION}`
 const SHELL_ASSETS = [
   '/',
   '/index.html',
+  '/viewer.html',
   '/manifest.webmanifest',
   '/icons/128x128.png',
   '/icons/128x128@2x.png',
@@ -89,7 +90,9 @@ async function networkFirst(req) {
     return res
   } catch {
     // 오프라인: 동일 요청 캐시 → 없으면 루트 셸 → 그래도 없으면 503.
-    const cached = (await cache.match(req)) || (await cache.match('/'))
+    // 뷰어 PWA이므로 오프라인 내비 폴백은 viewer.html 우선(루트 셸은 차선) — a11y P1.
+    const cached =
+      (await cache.match(req)) || (await cache.match('/viewer.html')) || (await cache.match('/'))
     return cached || new Response('오프라인 상태이며 캐시가 없습니다.', { status: 503 })
   }
 }

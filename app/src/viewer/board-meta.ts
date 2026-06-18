@@ -45,12 +45,11 @@ export function renderBoardMeta(meta: BoardMeta): HTMLElement {
     'backdrop-filter:blur(12px)',
   ].join(';')
 
-  // 제목(필수): heading 역할 + aria-level로 문서 구조를 명확히 한다.
-  const titleEl = document.createElement('div')
-  titleEl.setAttribute('role', 'heading')
-  titleEl.setAttribute('aria-level', '1')
+  // 제목(필수): 네이티브 <h1>로 문서 구조를 명확히 한다(가짜 role=heading보다 견고 — a11y P2).
+  const titleEl = document.createElement('h1')
   titleEl.textContent = meta.title
   titleEl.style.cssText = [
+    'margin:0', // h1 기본 마진 제거(패널 레이아웃 유지)
     'font-size:16px',
     'font-weight:600',
     'line-height:1.3',

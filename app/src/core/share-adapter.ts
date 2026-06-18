@@ -74,8 +74,12 @@ export class LocalShareAdapter implements ShareAdapter {
     if (!s) {
       throw new Error('이 환경에서는 localStorage를 사용할 수 없어 로컬 공유를 저장하지 못했습니다.')
     }
-    // board.ts의 serialize로 직렬화(저장 포맷 단일 진실).
-    s.setItem(STORAGE_PREFIX + id, serialize(board))
+    // board.ts의 serialize로 직렬화(저장 포맷 단일 진실). 쿼터 초과는 친절한 메시지로 변환(bug-io P2).
+    try {
+      s.setItem(STORAGE_PREFIX + id, serialize(board))
+    } catch {
+      throw new Error('용량 초과로 로컬 공유를 저장하지 못했습니다(이미지가 많은 보드는 .refb 저장을 권장).')
+    }
     return { id, url: this.getShareUrl(id) }
   }
 

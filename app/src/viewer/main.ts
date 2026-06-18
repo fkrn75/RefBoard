@@ -88,6 +88,27 @@ function openLightboxAt(id: string): void {
   if (idx >= 0) openLightbox(list, idx)
 }
 
+// 접근성: 키보드/스크린리더용 이미지 목록(시각적으로 숨김, 포커스·활성화 가능).
+// 보드는 PixiJS 캔버스 한 장이라 비텍스트 사용자에겐 콘텐츠가 0이므로,
+// 각 이미지를 라이트박스로 여는 버튼 목록을 대체 수단으로 제공한다(a11y P1·P2).
+function buildA11yImageList(b: BoardState): HTMLElement {
+  const nav = document.createElement('nav')
+  nav.setAttribute('aria-label', '보드 이미지 목록')
+  // sr-only 관용구 — 시각적으로 숨기되 포커스/스크린리더 접근은 유지.
+  nav.style.cssText =
+    'position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;' +
+    'clip:rect(0 0 0 0);white-space:nowrap;border:0'
+  const ordered = [...b.items].filter((i) => i.type === 'image').sort((a, c) => a.z - c.z)
+  ordered.forEach((it, i) => {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.textContent = `이미지 ${i + 1} 크게 보기 (총 ${ordered.length}개)`
+    btn.addEventListener('click', () => openLightboxAt(it.id))
+    nav.appendChild(btn)
+  })
+  return nav
+}
+
 // 휠 줌(커서 고정점).
 host.addEventListener(
   'wheel',
@@ -144,11 +165,14 @@ async function boot(): Promise<void> {
     meta.style.left = '16px'
     meta.style.zIndex = '50'
     document.body.appendChild(meta)
+    // 키보드/스크린리더 접근 수단(숨김 이미지 목록) — 캔버스만으론 비텍스트 접근이 0이다(a11y P1·P2).
+    document.body.appendChild(buildA11yImageList(board))
   } else {
     const msg = document.createElement('div')
     msg.style.cssText =
       'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;' +
       'color:var(--rb-text,#aaa);font:14px system-ui,sans-serif;text-align:center;padding:24px'
+    msg.setAttribute('role', 'status') // 스크린리더가 "보드 없음"을 읽도록(a11y P3)
     msg.textContent = '공유된 보드를 찾을 수 없습니다.'
     host.appendChild(msg)
   }
