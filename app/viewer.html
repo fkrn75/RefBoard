@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=no" />
+    <title>RefBoard 뷰어</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#1e1e1e" />
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: var(--rb-canvas-bg, #1e1e1e); }
+      #app { position: fixed; inset: 0; touch-action: none; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <!-- 자기완결 공유 HTML일 때 보드 데이터가 여기에 임베드된다(share-export). 없으면 안내/해시 폴백. -->
+    <!-- <script type="application/json" id="refboard-data">{...}</script> -->
+    <script type="module" src="/src/viewer/main.ts"></script>
+  </body>
+</html>

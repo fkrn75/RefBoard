@@ -36,6 +36,7 @@ import {
 import { createToolbar } from './core/toolbar'
 import { openSettings } from './core/settings-panel'
 import { createVirtualizer } from './core/virtualize'
+import { LocalShareAdapter } from './core/share-adapter'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -940,6 +941,7 @@ const WINDOW_ACTIONS: Action[] = [
 // 설정 패널(테마·단축키) 열기 — '앱' 그룹.
 const APP_EXTRA_ACTIONS: Action[] = [
   { id: 'app.settings', label: '설정', group: '앱', defaultCombo: 'Ctrl+,' },
+  { id: 'share.webLink', label: '웹 뷰어 링크 공유', group: '앱', defaultCombo: 'Ctrl+Shift+S' },
 ]
 // 단축키 액션 카탈로그 등록(저장된 사용자 재바인딩도 이때 함께 로드된다).
 registerActions([...DEFAULT_ACTIONS, ...WINDOW_ACTIONS, ...APP_EXTRA_ACTIONS])
@@ -997,6 +999,22 @@ function toggleCanvasLock() {
   canvasLocked = !canvasLocked
   toolbar.setActive('window.toggleLock', canvasLocked)
   showToast(canvasLocked ? '캔버스 잠금 · 편집/이동 차단' : '캔버스 잠금 해제', true)
+}
+// 웹 뷰어 링크 공유(서버리스 1차): LocalShareAdapter로 보드를 같은-출처 localStorage에 저장하고
+// viewer.html#/b/<id> 링크를 클립보드에 복사한다. 같은 브라우저 왕복용 — 기기간은 Supabase 어댑터(후속).
+async function shareWebLink() {
+  try {
+    const adapter = new LocalShareAdapter(location.origin + '/viewer.html')
+    const { url } = await adapter.upload(board)
+    try {
+      await navigator.clipboard.writeText(url)
+      showToast('웹 뷰어 링크 복사됨(같은 브라우저): ' + url, true)
+    } catch {
+      showToast('웹 뷰어 링크: ' + url, true)
+    }
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : '웹 공유 실패', true)
+  }
 }
 
 // 테마 변경 시 캔버스 배경 + 그리드 + 선택 외곽선을 새 색으로 다시 그린다.
@@ -1076,6 +1094,7 @@ function runAction(id: string) {
     case 'window.toggleLock': toggleCanvasLock(); break
     // 앱(설정 패널)
     case 'app.settings': openSettings(); break
+    case 'share.webLink': void shareWebLink(); break
   }
 }
 

@@ -1,0 +1,32 @@
+{
+  "name": "RefBoard Viewer",
+  "short_name": "RefBoard",
+  "description": "RefBoard 레퍼런스 보드 읽기 전용 웹 뷰어",
+  "lang": "ko",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#1e1e1e",
+  "background_color": "#1e1e1e",
+  "icons": [
+    {
+      "src": "/icons/128x128.png",
+      "sizes": "128x128",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/128x128@2x.png",
+      "sizes": "256x256",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
