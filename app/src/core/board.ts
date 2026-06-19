@@ -18,10 +18,20 @@ export interface Crop {
   h: number // 크롭 높이(원본 픽셀)
 }
 
+// 다중 해상도 이미지 세트(웹 공유 대역폭·초기 로딩 최적화 — Phase 5.1/5.3).
+// 공유 export 시점에만 생성한다(편집 보드는 단일 src 유지로 용량 증가 방지).
+// 뷰어는 srcs가 있으면 medium(보드뷰)/orig(라이트박스)를 고르고, 없으면 src로 폴백(하위호환).
+export interface ImageSrcSet {
+  thumb: string  // 긴 변 ~256px (저대역·초기 로드)
+  medium: string // 긴 변 ~1024px (보드 뷰 기본)
+  orig: string   // 원본(또는 4096 상한) — 라이트박스 풀스크린
+}
+
 export interface BoardImage {
   id: string
   type: 'image'
   src: string                  // 임베드(data URL) 또는 링크(파일/웹 경로)
+  srcs?: ImageSrcSet           // 다중 해상도(공유 export 시 생성, 없으면 src 폴백) — Phase 5.1/5.3
   natural: { w: number; h: number } // 원본 픽셀 크기
   transform: Transform
   crop?: Crop                  // 선택적 비파괴 크롭(없으면 원본 전체)

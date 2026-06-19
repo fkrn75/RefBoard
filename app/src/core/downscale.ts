@@ -15,10 +15,15 @@
 export interface DownscaleOptions {
   /** 긴 변 최대 픽셀. 이 값을 넘으면 비율 유지로 축소. 기본 4096 */
   maxEdge?: number
-  /** JPEG 출력 품질(0~1). PNG 출력에는 영향 없음. 기본 0.92 */
+  /** JPEG/WebP 출력 품질(0~1). PNG 출력에는 영향 없음. 기본 0.92 */
   quality?: number
   /** 2:1씩 단계 축소로 에일리어싱 완화. 기본 true */
   stepwise?: boolean
+  /**
+   * 출력 포맷 강제. 'auto'(기본)=알파 보존(PNG/JPEG), 'webp'=WebP(용량↓).
+   * 단 축소가 일어나는 경로에만 적용된다(임계값 이하 원본 반환 시엔 원본 포맷 유지).
+   */
+  format?: 'auto' | 'webp' | 'png' | 'jpeg'
 }
 
 export interface DownscaleResult {
@@ -57,6 +62,20 @@ function mayHaveAlpha(src: ImageSource): boolean {
   // 그 외(http/파일 경로 등)는 확장자로 추정, 모르면 보수적으로 알파 가능
   if (/\.jpe?g(\?|#|$)/i.test(src)) return false
   return true
+}
+
+// 출력 MIME 결정 — format이 지정되면 그대로, 'auto'/미지정이면 알파 보존 규칙(JPEG만 불투명).
+function resolveMime(format: DownscaleOptions['format'], src: ImageSource): string {
+  switch (format) {
+    case 'webp':
+      return 'image/webp'
+    case 'png':
+      return 'image/png'
+    case 'jpeg':
+      return 'image/jpeg'
+    default:
+      return mayHaveAlpha(src) ? 'image/png' : 'image/jpeg'
+  }
 }
 
 // 다양한 입력을 디코드해 ImageBitmap을 얻는다. createImageBitmap 우선,
@@ -180,8 +199,8 @@ export async function downscaleIfLarge(src: ImageSource, opts: DownscaleOptions 
     const targetW = Math.max(1, Math.round(srcW * ratio))
     const targetH = Math.max(1, Math.round(srcH * ratio))
 
-    // 출력 MIME 결정 (알파 보존)
-    const mime = mayHaveAlpha(src) ? 'image/png' : 'image/jpeg'
+    // 출력 MIME 결정: format 지정 시 우선, 'auto'/미지정은 알파 보존(JPEG만 불투명).
+    const mime = resolveMime(opts.format, src)
 
     let finalCanvas: AnyCanvas
     if (stepwise) {

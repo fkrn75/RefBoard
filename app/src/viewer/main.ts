@@ -83,7 +83,10 @@ function hitTest(sx: number, sy: number): string | null {
 // 클릭/탭한 이미지를 라이트박스로 연다(z 오름차순 목록에서 해당 인덱스).
 function openLightboxAt(id: string): void {
   if (!board) return
-  const list = [...board.items].sort((a, b) => a.z - b.z).map((it) => ({ id: it.id, src: it.src }))
+  // 라이트박스는 풀스크린이라 원본(srcs.orig)을 띄운다 — 없으면 src 폴백(편집·하위호환).
+  const list = [...board.items]
+    .sort((a, b) => a.z - b.z)
+    .map((it) => ({ id: it.id, src: it.srcs?.orig ?? it.src }))
   const idx = list.findIndex((x) => x.id === id)
   if (idx >= 0) openLightbox(list, idx)
 }

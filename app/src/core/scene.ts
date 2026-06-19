@@ -112,7 +112,9 @@ export class Scene {
       const buf = await (await fetch(img.src)).arrayBuffer()
       sprite = AnimatedGIF.fromBuffer(buf)
     } else {
-      const texture: Texture = await Assets.load(img.src)
+      // 보드 뷰는 medium(다중해상도)을 우선 로드 — 없으면 원본 src 폴백(편집 보드·하위호환).
+      // 원본 풀해상도는 뷰어 라이트박스가 srcs.orig로 따로 띄운다(scene은 medium까지만).
+      const texture: Texture = await Assets.load(img.srcs?.medium ?? img.src)
       sprite = new Sprite(texture)
     }
     sprite.anchor.set(0.5) // 중심 기준 배치/스케일/회전
@@ -143,9 +145,14 @@ export class Scene {
   // 보드 데이터의 변형값을 스프라이트에 반영(비파괴: 원본 텍스처 불변)
   applyTransform(sprite: Sprite, img: BoardImage) {
     sprite.position.set(img.transform.x, img.transform.y)
+    // 축소 텍스처(srcs.medium 등) 보정: 실픽셀(texture.width)이 원본(natural.w)보다 작으면
+    // 그 비율 k만큼 키워 같은 월드 크기로 보이게 한다. corners()/AABB/gizmo가 texture.width
+    // 기반이라 scale에 k를 실으면 자동 정합한다. srcs 없는(편집·하위호환) 보드는 k=1로 무영향.
+    const texW = sprite.texture.width
+    const k = img.srcs && texW > 0 ? img.natural.w / texW : 1
     // flip은 scale 부호로 반영(비파괴). corners()는 abs(scale)이라 경계/기즈모 계산엔 영향 없음.
-    const sx = img.transform.scale * (img.transform.flipX ? -1 : 1)
-    const sy = img.transform.scale * (img.transform.flipY ? -1 : 1)
+    const sx = img.transform.scale * k * (img.transform.flipX ? -1 : 1)
+    const sy = img.transform.scale * k * (img.transform.flipY ? -1 : 1)
     sprite.scale.set(sx, sy)
     sprite.rotation = img.transform.rotation
     sprite.alpha = img.opacity

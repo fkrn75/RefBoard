@@ -37,6 +37,7 @@ import { createToolbar } from './core/toolbar'
 import { openSettings } from './core/settings-panel'
 import { createVirtualizer } from './core/virtualize'
 import { LocalShareAdapter } from './core/share-adapter'
+import { attachSrcSets } from './core/srcset'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -1030,8 +1031,12 @@ function toggleCanvasLock() {
 // viewer.html#/b/<id> 링크를 클립보드에 복사한다. 같은 브라우저 왕복용 — 기기간은 Supabase 어댑터(후속).
 async function shareWebLink() {
   try {
+    // 공유본에 다중 해상도(thumb/medium/orig + WebP)를 생성해 뷰어 대역폭·초기 로딩을 줄인다(Phase 5.1/5.3).
+    // 원본 board는 불변(복제본 반환). crop/GIF 이미지는 자동 제외되어 src 폴백된다.
+    showToast('공유 준비 중(다중 해상도 생성)…', true)
+    const shared = await attachSrcSets(board)
     const adapter = new LocalShareAdapter(location.origin + '/viewer.html')
-    const { url } = await adapter.upload(board)
+    const { url } = await adapter.upload(shared)
     try {
       await navigator.clipboard.writeText(url)
       showToast('웹 뷰어 링크 복사됨(같은 브라우저): ' + url, true)
