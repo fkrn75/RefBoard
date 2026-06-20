@@ -37,6 +37,7 @@ import { createToolbar } from './core/toolbar'
 import { openSettings } from './core/settings-panel'
 import { createVirtualizer } from './core/virtualize'
 import { getShareAdapter } from './core/supabase-share'
+import { openShareDialog } from './core/share-dialog'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -1039,12 +1040,15 @@ async function shareWebLink() {
       await adapter.signIn() // 구글 OAuth 리다이렉트(돌아온 뒤 다시 공유)
       return
     }
-    // 이 보드를 볼 수 있는 사람의 이메일(쉼표 구분). 비우면 본인만(목업은 무시).
-    // TODO: prompt 대신 공유 모달(허용 이메일·공개 토글·만료) — M5.
-    const raw = prompt('이 보드를 볼 수 있는 사람의 이메일을 쉼표로 구분해 입력하세요.\n비우면 나만 볼 수 있어요:') ?? ''
-    const allowEmails = raw.split(',').map((s) => s.trim()).filter(Boolean)
+    // 공유 옵션(공개 여부·만료·허용 이메일)을 모달로 입력받는다(M5). 취소하면 중단.
+    const opts = await openShareDialog()
+    if (!opts) return
     showToast('공유 준비 중(업로드)…', true)
-    const { url } = await adapter.upload(board, { allowEmails })
+    const { url } = await adapter.upload(board, {
+      isPublic: opts.isPublic,
+      expiresAt: opts.expiresAt,
+      allowEmails: opts.allowEmails,
+    })
     try {
       await navigator.clipboard.writeText(url)
       showToast('웹 뷰어 링크 복사됨: ' + url, true)
