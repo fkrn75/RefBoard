@@ -128,12 +128,19 @@ create policy allowlist_owner on board_allowlist
 
 ```sql
 -- ===== Storage RLS (P1#2) =====
--- 읽기: board_id 폴더를 파싱해 boards_read와 '동일한' is_allowed()로 게이트.
+-- 읽기: board_id 폴더를 파싱해 boards를 조인, boards_read와 '동일한' 3갈래 게이트로 대칭화한다.
 -- (anon key가 공개라 '클라가 DB 확인 후 서명URL' 위임은 방어선이 아님 — 서버가 강제해야 한다.)
+-- ⚠️ is_allowed() 단일 갈래만 쓰면 is_public 보드나 소유자 본인도 서명URL이 거부돼(403)
+--    board JSON은 받지만 이미지가 '조용한 검정'이 된다. 반드시 boards_read와 같은 게이트여야 한다.
 create policy storage_boards_read on storage.objects
   for select using (
     bucket_id = 'boards'
-    and is_allowed((storage.foldername(name))[1])
+    and exists (
+      select 1 from boards b
+      where b.id = (storage.foldername(name))[1]
+        and (b.expires_at is null or b.expires_at > now())
+        and ( b.is_public or b.owner = auth.uid() or is_allowed(b.id) )
+    )
   );
 
 -- 쓰기/삭제: 해당 board 폴더의 '소유자'만(자기 보드에만 업로드)

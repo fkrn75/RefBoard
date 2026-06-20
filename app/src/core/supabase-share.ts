@@ -213,9 +213,16 @@ export class SupabaseShareAdapter implements ShareAdapter {
     if (keys.size === 0) return
 
     const list = [...keys]
-    const { data } = await this.sb().storage.from(BOARDS_BUCKET).createSignedUrls(list, SIGNED_URL_TTL)
+    const { data, error } = await this.sb().storage.from(BOARDS_BUCKET).createSignedUrls(list, SIGNED_URL_TTL)
+    // createSignedUrls는 Storage RLS 거부(403) 시 전체 {data:null, error}를 반환한다. error를 삼키면
+    // map이 비어 키 문자열이 srcs에 그대로 남고, 뷰어가 상대경로로 Assets.load → '조용한 검정'이 된다.
+    // 그래서 전체 실패는 즉시 throw(boot의 load catch가 안내 화면 표시)해 진단 가능하게 한다.
+    if (error) throw new Error('[뷰어] 이미지 서명 URL 발급 실패(Storage RLS 확인 필요): ' + error.message)
     const map = new Map<string, string>()
     for (const e of data ?? []) if (e.path && e.signedUrl) map.set(e.path, e.signedUrl)
+    // 부분 누락(일부 키만 서명 실패): 그 이미지는 키 문자열이 남아 검정이 되므로 경고로 표면화(렌더는 진행).
+    const missing = list.filter((k) => !map.has(k))
+    if (missing.length) console.warn('[뷰어] 서명 URL 누락 키(검정 위험):', missing)
 
     for (const it of board.items) {
       if (it.type !== 'image') continue
