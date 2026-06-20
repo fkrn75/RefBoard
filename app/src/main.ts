@@ -1052,6 +1052,7 @@ async function shareWebLink() {
       showToast('웹 뷰어 링크: ' + url, true)
     }
   } catch (e) {
+    console.error('[share] 업로드 실패:', e) // 진단: F12 콘솔에 전체 에러(테이블/정책/details) 노출
     showToast(e instanceof Error ? e.message : '웹 공유 실패', true)
   }
 }

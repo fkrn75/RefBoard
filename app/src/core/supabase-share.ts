@@ -73,7 +73,7 @@ export class SupabaseShareAdapter implements ShareAdapter {
       .filter((r) => r.email.length > 0)
     if (rows.length === 0) return
     const { error } = await this.sb().from('board_allowlist').upsert(rows)
-    if (error) throw error
+    if (error) throw new Error('[4/4 허용목록(board_allowlist)] ' + error.message)
   }
 
   // ---- 업로드(작성자) ----
@@ -96,7 +96,7 @@ export class SupabaseShareAdapter implements ShareAdapter {
       is_public: !!opts?.isPublic,
       expires_at: expiresAt,
     })
-    if (ins.error) throw ins.error
+    if (ins.error) throw new Error('[1/4 보드 생성(boards INSERT)] ' + ins.error.message)
 
     try {
       // attachSrcSets: 일반 이미지에 srcs(data URL) 생성 + 원본 src 비움(P1#4 코드 반영).
@@ -126,7 +126,7 @@ export class SupabaseShareAdapter implements ShareAdapter {
       assertNoDataUrls(shared)
 
       const upd = await sb.from('boards').update({ data: shared, status: 'ready' }).eq('id', id)
-      if (upd.error) throw upd.error
+      if (upd.error) throw new Error('[3/4 보드 확정(boards UPDATE)] ' + upd.error.message)
 
       if (opts?.allowEmails?.length) await this.setAllowlist(id, opts.allowEmails)
 
@@ -175,13 +175,15 @@ export class SupabaseShareAdapter implements ShareAdapter {
 
   // ---- 내부 헬퍼 ----
 
-  // data URL을 Blob으로 변환해 Storage에 업로드(같은 키면 덮어쓰기).
+  // data URL을 Blob으로 변환해 Storage에 업로드.
+  // upsert:false — board_id가 매번 고유(randomUUID)라 같은 키 충돌이 없어 덮어쓰기가 불필요하고,
+  // upsert:true는 Storage가 INSERT+UPDATE로 처리해 UPDATE 정책까지 요구하므로 INSERT-only RLS에서 막힌다(실측 확인).
   private async put(key: string, dataUrl: string): Promise<void> {
     const blob = dataUrlToBlob(dataUrl)
     const { error } = await this.sb()
       .storage.from(BOARDS_BUCKET)
-      .upload(key, blob, { contentType: blob.type || 'application/octet-stream', upsert: true })
-    if (error) throw error
+      .upload(key, blob, { contentType: blob.type || 'application/octet-stream', upsert: false })
+    if (error) throw new Error('[2/4 이미지 업로드(Storage)] ' + error.message)
   }
 
   // 보드 폴더의 모든 객체를 삭제(보상삭제용 best-effort). Storage list는 한 레벨이라 itemId 하위까지 순회.
