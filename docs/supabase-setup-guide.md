@@ -91,7 +91,15 @@ as $$
     where a.board_id = p_board_id
       and a.email = lower(auth.jwt() ->> 'email')
   )
-  and (auth.jwt() ->> 'email_verified')::boolean is true
+  -- ⚠️ email_verified 클레임은 JWT top-level이 아니라 user_metadata에만 있어
+  --    (auth.jwt() ->> 'email_verified')는 항상 NULL → (NULL)::boolean is true = false가 되어
+  --    owner를 제외한 모든 사용자(허용목록에 있어도)가 거부되는 버그였다.
+  --    위조 불가능한 auth.users.email_confirmed_at으로 검증한다
+  --    (GoTrue 관리값; user_metadata는 updateUser로 사용자가 덮어쓸 수 있어 신뢰 불가).
+  and exists (
+    select 1 from auth.users u
+    where u.id = auth.uid() and u.email_confirmed_at is not null
+  )
   and auth.jwt() ->> 'aud' = 'authenticated';
 $$;
 
