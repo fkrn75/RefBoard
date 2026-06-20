@@ -8,6 +8,11 @@ app/dist/
 # Tauri (Phase 4)
 src-tauri/target/
 
+# 환경변수(Supabase 키 등) — 커밋 금지(.env.example만 커밋)
+.env
+.env.local
+.env.*.local
+
 # 로그·임시
 *.log
 npm-debug.log*

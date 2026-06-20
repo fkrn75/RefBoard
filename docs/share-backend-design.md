@@ -3,7 +3,8 @@
 > 작성: 2026-06-19 · 상태: **설계(구현 전)** · 관련 체크리스트: 5.0 BaaS 선정, 5.1 업로드, 5.4 권한·보안
 > 전제 결정(사용자 확정): **무료(카드 미등록 → 과금 원천 차단), 강한 접근제어(로그인 + 이메일 허용 목록), 한도 초과 시 정지(과금 X), 실시간 동기화 제외.**
 >
-> ⚠️ **적대검증 결과(2026-06-20, 5라운드/31에이전트): 조건부 No-Go.** 방향은 타당하나 그대로 구현 시 접근제어가 뚫리고(P1#1·#2) 무료 한도가 '복구 불가 데드락'이 된다(P1#3~#7). **P1 7건 보강 전 구현 착수 금지** → 상세·수정안은 [16절](#16-적대검증5라운드-결과--착수-전-필수-선결) 참조.
+> ⚠️ **적대검증 결과(2026-06-20, 5라운드/31에이전트): 조건부 No-Go.** 방향은 타당하나 그대로 구현 시 접근제어가 뚫리고(P1#1·#2) 무료 한도가 '복구 불가 데드락'이 된다(P1#3~#7). 상세·근거는 [16절](#16-적대검증5라운드-결과--착수-전-필수-선결) 참조.
+> ✅ **v2(2026-06-20): P1 7건 본문 반영 완료** — 4·5·6·8·9·11·12·13·14·15절에 통합(16절은 검증 이력 원문으로 보존). `srcset.ts` P1#4는 **코드 반영 완료**(일반 이미지 src 비움); crop·GIF 경량본·Storage 키 치환은 SupabaseShareAdapter(M3, 키 발급 후). 이제 **Go 조건 충족 — M1(사용자 키 발급)부터 착수 가능.**
 
 ## 1. 목표와 제약
 
@@ -46,10 +47,11 @@
 ```sql
 -- 보드 메타(이미지 바이너리는 Storage, 여기엔 구조/참조만)
 create table boards (
-  id          text primary key,                 -- 기존 genId() 12자 재사용
+  id          text primary key,                 -- 고엔트로피 ID(nanoid 22자 ≈132bit 또는 UUID). genId() 12자(48bit)는 enumerate 취약 → 확대(P1#2)
   owner       uuid not null references auth.users(id) on delete cascade,
   title       text not null default '',
   data        jsonb not null,                   -- BoardState(단, items[].srcs는 Storage '키' 저장)
+  status      text not null default 'uploading' check (status in ('uploading','ready')), -- P1#5: 업로드 완료 전 orphan/부분노출 방지
   is_public   boolean not null default false,   -- true면 허용목록 무시(공개 보드)
   password_hash text,                           -- 선택: '중' 수준 비번 병행 시
   expires_at  timestamptz,                      -- 선택: 만료(null=무기한)
@@ -65,6 +67,23 @@ create table board_allowlist (
 );
 
 create index on board_allowlist (email);
+
+-- is_allowed(): RLS 단일 게이트. SECURITY DEFINER로 호출자 권한과 무관하게 함수 소유자 권한으로 실행.
+-- 미검증 email 클레임(매직링크 미확인/임의 provider) 신뢰를 차단 — email_verified + aud 동시 검증(P1#1).
+create or replace function is_allowed(p_board_id text)
+returns boolean
+language sql
+security definer
+stable
+as $$
+  select exists (
+    select 1 from board_allowlist a
+    where a.board_id = p_board_id
+      and a.email = lower(auth.jwt() ->> 'email')
+  )
+  and (auth.jwt() ->> 'email_verified')::boolean is true
+  and auth.jwt() ->> 'aud' = 'authenticated';
+$$;
 ```
 
 ## 5. RLS 정책 (핵심 — 진짜 격리)
@@ -78,18 +97,14 @@ create policy boards_owner_all on boards
   for all  using (owner = auth.uid())
            with check (owner = auth.uid());
 
--- 읽기: (공개) 또는 (소유자) 또는 (로그인 이메일이 허용목록에 있음) + 만료 안 됨
+-- 읽기: (공개) 또는 (소유자) 또는 (is_allowed() 통과) + 만료 안 됨
 create policy boards_read on boards
   for select using (
     (expires_at is null or expires_at > now())
     and (
       is_public
       or owner = auth.uid()
-      or exists (
-        select 1 from board_allowlist a
-        where a.board_id = boards.id
-          and a.email = lower(auth.jwt() ->> 'email')
-      )
+      or is_allowed(boards.id)   -- SECURITY DEFINER: email_verified + aud 내부 검증(P1#1)
     )
   );
 
@@ -100,7 +115,7 @@ create policy allowlist_owner on board_allowlist
   );
 ```
 
-> 핵심: 뷰어는 anon key로 접속하지만, `select`는 RLS를 통과해야만 행을 받는다. id를 알아도 허용목록에 없으면 **0행 반환 = 접근 거부**.
+> 핵심: 뷰어는 anon key로 접속하지만, `select`는 RLS를 통과해야만 행을 받는다. id를 알아도 허용목록에 없으면 **0행 반환 = 접근 거부**. 허용목록 검증은 `is_allowed()` SECURITY DEFINER 함수로 단일화 — 미검증 email 클레임(매직링크 미확인 등)으로 우회하는 공격을 차단(`email_verified: true` + `aud: 'authenticated'` 동시 검증, P1#1).
 
 ## 6. Storage 구조 + 다중해상도 연계
 
@@ -108,12 +123,21 @@ create policy allowlist_owner on board_allowlist
 ```
 {board_id}/{image_id}/thumb.webp
 {board_id}/{image_id}/medium.webp
-{board_id}/{image_id}/orig.{ext}     # ext = 원본 보존 시 png/jpg, 4096축소 시 webp
+# orig는 기본 미저장(P1#3) — 공유·라이트박스 모두 medium 재사용.
+# orig 저장은 명시 옵트인("고화질 보존" 체크) 시에만: {board_id}/{image_id}/orig.{ext}
 ```
 
-- **Storage RLS(강제)**: `storage.objects`에 SELECT RLS를 **반드시** 둔다 — `(storage.foldername(name))[1]`을 board_id로 파싱해 `boards_read`와 **동일한 `is_allowed()` 함수**로 게이트(createSignedUrl이 RLS를 거치게). ~~"어댑터가 DB read 성공 후 createSignedUrl"~~ 클라이언트 로직 위임안은 **삭제**(anon key 공개라 방어선 아님 — 16절 P1#2).
+- **Storage RLS(강제, P1#2)**: `storage.objects`에 SELECT RLS를 **반드시** 적용한다. 클라이언트 로직("DB select 성공 시 createSignedUrl") 위임은 방어선이 아님 — anon key가 공개라 DB가 0행을 반환해도 공격자가 키 경로를 추측해 직접 `createSignedUrl`을 호출할 수 있다. board_id로 파싱해 `boards_read`와 **동일한 `is_allowed()`** 로 게이트:
+  ```sql
+  create policy storage_boards_read on storage.objects
+    for select using (
+      bucket_id = 'boards'
+      and is_allowed((storage.foldername(name))[1])
+    );
+  ```
+- **board_id 고엔트로피화 필수(P1#2)**: 경로 `{board_id}/{image_id}/...` 구조상 board_id 추측 공격이 가능 — `genId()` 12자(48bit)→`nanoid(22)`(≈132bit) 또는 `crypto.randomUUID()`로 확대(4절 `boards.id`에 반영).
 - **board.json의 `srcs`는 data URL이 아니라 Storage '키'**(예: `verify/abc/medium.webp`)를 저장 → DB 용량 최소화.
-- **load 시 어댑터가 키 → 서명 URL(만료 1h)로 치환**해 반환. 뷰어 `scene`/`lightbox`는 `srcs.medium`/`srcs.orig`를 그냥 문자열 src로 받으므로 **무수정**(현재 다중해상도 구현이 그대로 동작).
+- **load 시 어댑터가 키 → 서명 URL로 치환**해 반환. **medium은 장수명 서명URL(7d)+`Cache-Control: max-age=604800`**(1h 토큰 회전 시 매시간 재다운로드→egress 5GB 조기소진 방지, P1#6), orig(옵트인 시)는 라이트박스 클릭 시점 온디맨드 단축(1h). 뷰어 `scene`/`lightbox`는 `srcs.medium`/`srcs.orig`를 문자열 src로 받으므로 **무수정**(현재 다중해상도 구현이 그대로 동작). 장기적으론 이미지를 egress 무제한 Cloudflare(R2/Pages)로 이전해 Supabase는 메타·권한만 담당하는 구조로 발전 가능.
 
 > 이 분리 저장이 다중해상도의 진짜 이득 실현 지점 — 보드뷰는 medium만 fetch하므로 egress가 orig 대비 ~20배 절감(이번 구현에서 측정).
 
@@ -162,14 +186,26 @@ interface ShareAdapter {
 
 ```
 1. user = await adapter.getCurrentUser(); if (!user) await adapter.signIn()
-2. const shared = await attachSrcSets(board)            // 이미 구현(data URL 3종 생성)
-3. for each image in shared.items:
-     - srcs.thumb/medium/orig(data URL) → Blob → Storage upload({id}/{imgId}/*.webp)
-     - srcs를 Storage '키'로 치환, **원본 src(대용량 dataURL)는 반드시 삭제** + crop·GIF 아이템도 경량본 업로드 후 키로 치환
-     - ⚠️ 현재 `srcset.ts attachSrcSets`는 src를 안 지우고 crop/GIF는 srcs조차 없음 → SupabaseShareAdapter 후처리에서 이를 보정해야 함(16절 P1#4). insert 전 jsonb에 `data:` 접두 잔존 가드.
-4. boards.insert({ id, owner, title, data: shared, expires_at })
-5. board_allowlist.insert(allowEmails.map(e => ({ board_id:id, email:lower(e) })))
-6. return `${deployUrl}/viewer.html#/b/${id}`
+2. const id = nanoid(22)                                   // 고엔트로피 board_id(P1#2)
+   await boards.insert({ id, owner, title, data:{}, status:'uploading', expires_at })  // P1#5: 행 먼저
+   try {
+3.   const shared = await attachSrcSets(board)             // srcs(data URL) 생성 + src 비움(코드 반영 완료, P1#4)
+     for each item in shared.items:
+       if (item.srcs) {                                    // 일반 이미지
+         srcs.thumb/medium(+orig는 옵트인) → Blob → Storage upload({id}/{itemId}/*.webp)
+         item.srcs = { thumb:'키', medium:'키' }           // data URL → Storage 키. src는 이미 '' (attachSrcSets)
+       } else {                                            // crop·GIF(srcs 없음)
+         const light = await makeLightCopy(item)           // crop 영역 잘라 medium / GIF 대표 프레임
+         upload(light); item.src = '키'                    // 원본 대용량 data URL → Storage 키
+       }
+     assertNoDataUrls(shared)                              // 가드: jsonb에 'data:' 잔존 시 throw
+4.   await boards.update({ id, data: shared, status:'ready' })          // 완료 후에만 ready
+5.   board_allowlist.insert(allowEmails.map(e => ({ board_id:id, email:lower(e) })))
+6.   return `${deployUrl}/viewer.html#/b/${id}`
+   } catch (e) {                                           // P1#5: 보상삭제
+     await storage.remove([`${id}/`]); await boards.delete().eq('id', id); throw e
+   }
+   // 고아 GC(cron): status='uploading' AND created_at < now()-1h 주기 정리
 ```
 
 UI: 공유 버튼 → 모달(허용 이메일 입력 textarea + 공개 토글 + 만료 선택) → 진행 표시(다중해상도 생성·업로드).
@@ -186,7 +222,9 @@ UI: 공유 버튼 → 모달(허용 이메일 입력 textarea + 공개 토글 + 
        'expired'      → "만료된 링크입니다"
        'not-found'    → "보드를 찾을 수 없습니다"
        'auth-required'→ 로그인 유도
-4. r.ok: board.items[].srcs를 createSignedUrl(키, 3600s)로 치환
+4. r.ok: board.items[].srcs를 해상도별 차등 서명URL로 치환(P1#6):
+   - medium: createSignedUrl(키, 604800s /*7d*/) + Cache-Control: max-age=604800
+   - orig(옵트인 시): 라이트박스 클릭 시 createSignedUrl(키, 3600s) 온디맨드 단축
 5. scene.rebuild(board.items)  // medium 렌더 / 라이트박스 orig — 기존 그대로
 ```
 
@@ -202,12 +240,12 @@ UI: 공유 버튼 → 모달(허용 이메일 입력 textarea + 공개 토글 + 
 |---|---|---|---|
 | DB | 500MB | 메타·허용목록(작음) → 여유 | 쓰기 제한 |
 | **Storage** | **1GB** | 이미지 → **먼저 닳음** | 업로드 정지 |
-| **Egress** | **5GB/월** | medium 덕에 완화 | 다운로드 정지 |
+| **Egress** | **5GB/월** | medium 7d 서명URL+캐시로 완화(P1#6), 80% 알림 필요 | 다운로드 정지(권한 통과해도 바이너리 0) |
 | MAU | 50,000 | 충분 | — |
 
 - **카드 미등록 = 과금 0**(원하신 "넘으면 정지" 보장).
-- **1주 비활성 → 프로젝트 일시정지**(무료 함정): 일 1회 health ping(GitHub Actions cron / cron-job.org)으로 깨워두기.
-- Storage 1GB 관리: orig 보관이 부담이면 orig도 4096 상한 webp로(현재 srcset 기본), 오래된 보드 수동/배치 정리.
+- **1주 비활성 → 프로젝트 일시정지**(무료 함정): 단일 ping은 지연/스킵/60일 자동비활성·무알림 리스크 → **2개 이상 이중화 필수(P1#7)**: ①GitHub Actions cron(`0 9 * * *`) ②cron-job.org 백업(다른 시간대). 둘 다 `/health` 확인 후 실패 시 경보(Slack/이메일). 중요 보드는 자기완결 HTML(`share-export.ts`)로도 이중 보관.
+- **Storage 1GB 관리(P1#3)**: orig 기본 미저장 — medium(~80KB/장)만 사용. 80장 보드면 ≈6.4MB → 보드 ~150개(orig 포함 시 4~5개). 공유 모달에 잔여 용량 표시 + 업로드 전 사전 가드. **보드 삭제 UI + Storage cascade는 M3 필수**.
 
 ## 12. 기존 코드 변경 지점
 
@@ -215,7 +253,7 @@ UI: 공유 버튼 → 모달(허용 이메일 입력 textarea + 공개 토글 + 
 |---|---|
 | `core/board.ts` | `ImageSrcSet` 의미 확장 주석(문자열 = dataURL 또는 Storage키/서명URL). 타입은 동일(string) |
 | `core/share-adapter.ts` | `ShareAdapter` 확장 + **`SupabaseShareAdapter` 신규** + `LocalShareAdapter` stub 보강 |
-| `core/srcset.ts` | 변경 없음(data URL 생성). Supabase 어댑터가 후처리로 Storage 업로드 |
+| `core/srcset.ts` | **`attachSrcSets`가 srcs 채운 직후 일반 이미지의 `item.src=''`로 비움(P1#4, 코드 반영 완료)**. crop·GIF 경량본 생성·Storage 키 치환·`assertNoDataUrls` 가드는 SupabaseShareAdapter 후처리(M3) |
 | `main.ts` | `shareWebLink`에 signIn + 허용 이메일 UI + SupabaseShareAdapter 주입 |
 | `viewer/main.ts` | `loadHashBoard`에 auth 분기 + LoadResult 에러 UI + 서명URL 치환 |
 | `viewer.html` | OAuth 콜백/해시 복원 처리 |
@@ -226,10 +264,10 @@ UI: 공유 버튼 → 모달(허용 이메일 입력 textarea + 공개 토글 + 
 
 - **M1 인프라**: (사용자) Supabase 프로젝트 생성 → 스키마/RLS SQL 적용 → 구글 OAuth 설정 → `.env` 키.
 - **M2 Auth**: SupabaseShareAdapter 골격 — signIn/signOut/getCurrentUser + 세션 복원.
-- **M3 업로드**: attachSrcSets 산출물 Storage 분리 업로드 + boards/allowlist insert.
+- **M3 업로드**: ①`boards.insert(status='uploading')` 선행 → ②Storage 분리 업로드(P1#4 후처리: crop·GIF 경량본·키 치환·가드) → ③`status='ready'`. try/catch 보상삭제 + 고아 GC cron. **보드 삭제 UI + Storage cascade(P1#3) 이 단계 필수**.
 - **M4 로드**: RLS select + 서명URL 치환 + 뷰어 에러 UI(로그인/권한/만료).
 - **M5 작성자 UI**: 공유 모달(허용 이메일 입력·공개 토글·만료).
-- **M6 운영·검증**: 정지 방지 ping + **2계정 e2e**(허가 이메일=열림 / 미허가=거부 / 만료=거부).
+- **M6 운영·검증**: health ping **2개 이중화 + 실패 알림**(P1#7). **2계정 e2e**: 허가=열림 / 미허가=거부 / 만료=거부 / `allowlist` 직접 select 0행(P2#8) / 비공개 전환 후 Storage 키 직접 접근 차단(P2#10). egress 80% 알림 확인.
 
 ## 14. 미결정 — 사용자 입력 필요
 
@@ -237,14 +275,17 @@ UI: 공유 버튼 → 모달(허용 이메일 입력 textarea + 공개 토글 + 
 2. **뷰어 배포 도메인** (`getShareUrl` 베이스). 후보: Cloudflare Pages(무료·대역폭 무제한). 정해야 OAuth redirect URL도 등록 가능
 3. **로그인 수단**: 구글만? 매직링크도 함께?
 4. **'중' 수준(비번/만료) 병행 여부** — 허용목록만으로 충분한지, 비번도 옵션 제공할지
-5. **orig 저장 정책**: 원본 무손실 보존(용량↑) vs 4096 상한 webp(용량↓)
+5. ~~**orig 저장 정책**~~ → **결정됨(P1#3): 기본 미저장(medium 재사용)**. "고화질 보존" 명시 옵트인 시에만 orig 업로드(잔여 용량 표시 후 확인)
 
 ## 15. 보안 체크리스트(구현 시 필수)
 
 - [ ] 모든 표 RLS enable(anon key 공개 전제 — RLS가 유일 방어선)
 - [ ] Storage 버킷 비공개 + 서명 URL만(공개 URL 금지)
-- [ ] 서명 URL 만료 짧게(1h)
+- [ ] 서명 URL: medium 7d 장수명 + `Cache-Control: max-age=604800`, orig 온디맨드 1h(P1#6) — 전체 1h 단일 정책 금지
+- [ ] 허용목록 검증은 `is_allowed()` SECURITY DEFINER로 단일화 — `email_verified: true` + `aud: 'authenticated'` 내부 검증(P1#1), 인라인 `exists(...)` 직접 비교 금지
 - [ ] 허용목록 이메일 = `auth.jwt() ->> 'email'` 비교 시 **소문자 정규화** 양쪽
+- [ ] Storage `storage.objects`도 `is_allowed()` SELECT RLS 적용 + board_id 고엔트로피(P1#2)
+- [ ] 업로드는 insert(status='uploading')→Storage→ready 순서 + 보상삭제·고아 GC(P1#5)
 - [ ] 보드 수정/삭제는 `owner = auth.uid()`만
 - [ ] anon key만 클라이언트 노출(service_role 키는 절대 클라이언트에 넣지 않음)
 - [ ] 만료 검사 RLS에 포함(클라이언트 검사만으로 불충분)

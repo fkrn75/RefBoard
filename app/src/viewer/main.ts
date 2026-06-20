@@ -8,7 +8,7 @@ import { openLightbox } from './lightbox'
 import { renderBoardMeta } from './board-meta'
 import { attachTouchGestures } from './touch'
 import { registerServiceWorker } from './pwa'
-import { LocalShareAdapter } from '../core/share-adapter'
+import { getShareAdapter } from '../core/supabase-share'
 
 const host = document.getElementById('app') as HTMLElement
 
@@ -28,16 +28,10 @@ function loadEmbeddedBoard(): BoardState | null {
   }
 }
 
-// ② URL 해시 #/b/<id>에서 보드 읽기(LocalShareAdapter — 같은 브라우저 왕복 검증용. Supabase는 후속).
-async function loadHashBoard(): Promise<BoardState | null> {
+// ② URL 해시 #/b/<id>에서 board id 추출(실제 로드는 boot에서 어댑터로 — 사유별 화면 분기).
+function hashBoardId(): string | null {
   const m = location.hash.match(/^#\/b\/(.+)$/)
-  if (!m) return null
-  try {
-    const s = await new LocalShareAdapter().load(m[1])
-    return isValidBoard(s) ? s : null
-  } catch {
-    return null
-  }
+  return m ? m[1] : null
 }
 
 applyTheme(getTheme())
@@ -152,32 +146,111 @@ attachTouchGestures(host, {
 host.addEventListener('contextmenu', (e) => e.preventDefault())
 window.addEventListener('resize', () => fitAll())
 
+// 보드를 화면에 렌더(임베드/해시 공통 경로).
+async function renderBoard(b: BoardState): Promise<void> {
+  board = b
+  await scene.rebuild(b.items)
+  fitAll()
+  // 보드 메타(제목/이미지 수) 좌상단.
+  const meta = renderBoardMeta({
+    title: b.board.title || 'RefBoard',
+    count: b.items.filter((i) => i.type === 'image').length,
+  })
+  meta.style.position = 'fixed'
+  meta.style.top = '16px'
+  meta.style.left = '16px'
+  meta.style.zIndex = '50'
+  document.body.appendChild(meta)
+  // 키보드/스크린리더 접근 수단(숨김 이미지 목록) — 캔버스만으론 비텍스트 접근이 0이다(a11y P1·P2).
+  document.body.appendChild(buildA11yImageList(b))
+}
+
+// 중앙 안내 화면(권한/만료/없음/로그인 공통). actions가 있으면 메시지 아래에 버튼을 단다.
+function showCenter(message: string, actions: HTMLElement[] = []): void {
+  const wrap = document.createElement('div')
+  wrap.style.cssText =
+    'position:fixed;inset:0;display:flex;flex-direction:column;gap:16px;align-items:center;justify-content:center;' +
+    'color:var(--rb-text,#ccc);font:14px system-ui,sans-serif;text-align:center;padding:24px;white-space:pre-line'
+  wrap.setAttribute('role', 'status') // 스크린리더가 안내를 읽도록(a11y P3)
+  const p = document.createElement('div')
+  p.textContent = message
+  wrap.appendChild(p)
+  for (const a of actions) wrap.appendChild(a)
+  host.appendChild(wrap)
+}
+
+// 로그인 화면(구글 OAuth + 이메일 매직링크 폴백).
+function showLoginScreen(adapter: ReturnType<typeof getShareAdapter>): void {
+  const google = document.createElement('button')
+  google.type = 'button'
+  google.textContent = '구글로 계속하기'
+  google.style.cssText =
+    'padding:10px 18px;border-radius:8px;border:0;background:#4285f4;color:#fff;cursor:pointer;font-size:14px'
+  google.addEventListener('click', () => void adapter.signIn())
+
+  const row = document.createElement('div')
+  row.style.cssText = 'display:flex;gap:8px;align-items:center'
+  const input = document.createElement('input')
+  input.type = 'email'
+  input.placeholder = '이메일(매직링크)'
+  input.style.cssText =
+    'padding:9px 12px;border-radius:8px;border:1px solid #555;background:#222;color:#eee;font-size:14px'
+  const send = document.createElement('button')
+  send.type = 'button'
+  send.textContent = '링크 받기'
+  send.style.cssText =
+    'padding:9px 14px;border-radius:8px;border:0;background:#444;color:#fff;cursor:pointer;font-size:14px'
+  send.addEventListener('click', async () => {
+    const email = input.value.trim()
+    if (!email) return
+    try {
+      await adapter.signInWithEmail(email)
+      send.textContent = '메일을 확인하세요'
+      send.disabled = true
+    } catch {
+      send.textContent = '실패 — 다시 시도'
+    }
+  })
+  row.appendChild(input)
+  row.appendChild(send)
+
+  showCenter('이 보드를 보려면 로그인이 필요합니다.', [google, row])
+}
+
 // ---- 부트 ----
 async function boot(): Promise<void> {
-  board = loadEmbeddedBoard() ?? (await loadHashBoard())
-  if (board) {
-    await scene.rebuild(board.items)
-    fitAll()
-    // 보드 메타(제목/이미지 수) 좌상단. description/author는 공유 메타 확장 시 채움.
-    const meta = renderBoardMeta({
-      title: board.board.title || 'RefBoard',
-      count: board.items.filter((i) => i.type === 'image').length,
-    })
-    meta.style.position = 'fixed'
-    meta.style.top = '16px'
-    meta.style.left = '16px'
-    meta.style.zIndex = '50'
-    document.body.appendChild(meta)
-    // 키보드/스크린리더 접근 수단(숨김 이미지 목록) — 캔버스만으론 비텍스트 접근이 0이다(a11y P1·P2).
-    document.body.appendChild(buildA11yImageList(board))
+  // ① 자기완결 HTML 임베드 우선(로그인·네트워크 불필요).
+  const embedded = loadEmbeddedBoard()
+  if (embedded) {
+    await renderBoard(embedded)
+    void registerServiceWorker()
+    return
+  }
+  // ② 해시 #/b/<id> → 어댑터 로드(Supabase 키 있으면 클라우드, 없으면 목업).
+  const id = hashBoardId()
+  if (!id) {
+    showCenter('공유된 보드를 찾을 수 없습니다.')
+    void registerServiceWorker()
+    return
+  }
+  const adapter = getShareAdapter(location.origin + location.pathname)
+  let res
+  try {
+    res = await adapter.load(id)
+  } catch {
+    showCenter('보드를 불러오지 못했습니다.\n잠시 후 다시 시도해주세요.')
+    void registerServiceWorker()
+    return
+  }
+  if (res.ok && isValidBoard(res.board)) {
+    await renderBoard(res.board)
   } else {
-    const msg = document.createElement('div')
-    msg.style.cssText =
-      'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;' +
-      'color:var(--rb-text,#aaa);font:14px system-ui,sans-serif;text-align:center;padding:24px'
-    msg.setAttribute('role', 'status') // 스크린리더가 "보드 없음"을 읽도록(a11y P3)
-    msg.textContent = '공유된 보드를 찾을 수 없습니다.'
-    host.appendChild(msg)
+    const reason = res.ok ? 'not-found' : res.reason
+    if (reason === 'auth-required') showLoginScreen(adapter)
+    else if (reason === 'forbidden')
+      showCenter('이 보드에 접근할 권한이 없습니다.\n보드 주인에게 초대를 요청하세요.')
+    else if (reason === 'expired') showCenter('만료된 공유 링크입니다.')
+    else showCenter('공유된 보드를 찾을 수 없습니다.')
   }
   void registerServiceWorker() // PWA(오프라인 캐싱) — 미지원/실패 시 조용히 패스
 }

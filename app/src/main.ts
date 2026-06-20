@@ -36,8 +36,7 @@ import {
 import { createToolbar } from './core/toolbar'
 import { openSettings } from './core/settings-panel'
 import { createVirtualizer } from './core/virtualize'
-import { LocalShareAdapter } from './core/share-adapter'
-import { attachSrcSets } from './core/srcset'
+import { getShareAdapter } from './core/supabase-share'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -1027,19 +1026,28 @@ function toggleCanvasLock() {
   toolbar.setActive('window.toggleLock', canvasLocked)
   showToast(canvasLocked ? '캔버스 잠금 · 편집/이동 차단' : '캔버스 잠금 해제', true)
 }
-// 웹 뷰어 링크 공유(서버리스 1차): LocalShareAdapter로 보드를 같은-출처 localStorage에 저장하고
-// viewer.html#/b/<id> 링크를 클립보드에 복사한다. 같은 브라우저 왕복용 — 기기간은 Supabase 어댑터(후속).
+// 웹 뷰어 링크 공유: Supabase 키가 있으면 클라우드(로그인+허용목록+서명URL)로, 없으면 LocalShareAdapter
+// (같은 브라우저 목업)로 업로드하고 viewer.html#/b/<id> 링크를 클립보드에 복사한다.
+// 다중 해상도(thumb/medium/orig) 생성·원본 src 제거는 어댑터 내부에서 수행한다(Phase 5.1/5.3, P1#4).
 async function shareWebLink() {
   try {
-    // 공유본에 다중 해상도(thumb/medium/orig + WebP)를 생성해 뷰어 대역폭·초기 로딩을 줄인다(Phase 5.1/5.3).
-    // 원본 board는 불변(복제본 반환). crop/GIF 이미지는 자동 제외되어 src 폴백된다.
-    showToast('공유 준비 중(다중 해상도 생성)…', true)
-    const shared = await attachSrcSets(board)
-    const adapter = new LocalShareAdapter(location.origin + '/viewer.html')
-    const { url } = await adapter.upload(shared)
+    const adapter = getShareAdapter(location.origin + '/viewer.html')
+    // 클라우드 백엔드면 로그인 필요(목업은 항상 로그인 상태로 통과).
+    const user = await adapter.getCurrentUser()
+    if (!user) {
+      showToast('공유하려면 로그인이 필요합니다. 로그인 후 다시 공유를 눌러주세요…', true)
+      await adapter.signIn() // 구글 OAuth 리다이렉트(돌아온 뒤 다시 공유)
+      return
+    }
+    // 이 보드를 볼 수 있는 사람의 이메일(쉼표 구분). 비우면 본인만(목업은 무시).
+    // TODO: prompt 대신 공유 모달(허용 이메일·공개 토글·만료) — M5.
+    const raw = prompt('이 보드를 볼 수 있는 사람의 이메일을 쉼표로 구분해 입력하세요.\n비우면 나만 볼 수 있어요:') ?? ''
+    const allowEmails = raw.split(',').map((s) => s.trim()).filter(Boolean)
+    showToast('공유 준비 중(업로드)…', true)
+    const { url } = await adapter.upload(board, { allowEmails })
     try {
       await navigator.clipboard.writeText(url)
-      showToast('웹 뷰어 링크 복사됨(같은 브라우저): ' + url, true)
+      showToast('웹 뷰어 링크 복사됨: ' + url, true)
     } catch {
       showToast('웹 뷰어 링크: ' + url, true)
     }

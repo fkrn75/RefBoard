@@ -8,19 +8,47 @@
 //   두 경로 모두 board.ts의 BoardState/serialize/deserialize를 단일 진실로 공유한다.
 
 import { serialize, deserialize, genId, type BoardState } from './board'
+import { attachSrcSets } from './srcset'
 
 /**
  * 클라우드 공유 어댑터 계약.
  * 백엔드가 무엇이든(localStorage 목업·Supabase·자체 서버) 이 4개 메서드만 만족하면
  * 상위(공유 UI/딥링크 라우팅)는 구현을 몰라도 된다.
  */
+// 공유 사용자(로그인 주체). 지금은 이메일만 필요.
+export interface ShareUser {
+  email: string
+}
+
+// 업로드 옵션 — 허용목록/공개/만료/진행콜백.
+export interface UploadOptions {
+  allowEmails?: string[]
+  isPublic?: boolean
+  expiresAt?: Date
+  onProgress?: (done: number, total: number) => void
+}
+
+// 로드 결과 — 성공이면 보드, 실패면 사유(뷰어가 화면 분기). null 대신 사유를 담는다.
+export type LoadResult =
+  | { ok: true; board: BoardState }
+  | { ok: false; reason: 'auth-required' | 'forbidden' | 'expired' | 'not-found' }
+
 export interface ShareAdapter {
   // 보드를 업로드하고 식별자와 공유 URL을 돌려준다.
-  upload(board: BoardState): Promise<{ id: string; url: string }>
+  upload(board: BoardState, opts?: UploadOptions): Promise<{ id: string; url: string }>
   // 식별자로부터 공유 URL을 합성한다(업로드 없이 링크만 다시 만들 때).
   getShareUrl(id: string): string
-  // 식별자로 보드를 복원한다. 없으면 null(만료/오타/미존재).
-  load(id: string): Promise<BoardState | null>
+  // 식별자로 보드를 복원한다. 성공/실패 사유를 LoadResult로 반환.
+  load(id: string): Promise<LoadResult>
+
+  // ---- 인증(목업 어댑터는 stub로 "항상 로그인") ----
+  getCurrentUser(): Promise<ShareUser | null>
+  signIn(): Promise<void> // 구글 OAuth(리다이렉트)
+  signInWithEmail(email: string): Promise<void> // 매직링크(이메일)
+  signOut(): Promise<void>
+
+  // ---- 허용목록(작성자용) ----
+  setAllowlist(id: string, emails: string[]): Promise<void>
 }
 
 // LocalShareAdapter가 localStorage에 쓰는 키 접두사. 한 항목 = 한 보드의 직렬화 JSON.
@@ -67,16 +95,19 @@ export class LocalShareAdapter implements ShareAdapter {
     }
   }
 
-  async upload(board: BoardState): Promise<{ id: string; url: string }> {
+  async upload(board: BoardState, opts?: UploadOptions): Promise<{ id: string; url: string }> {
+    // 목업은 옵션(허용목록/공개/만료)을 무시한다 — 로컬은 항상 본인만 열람.
     // 짧은 식별자 생성(board.ts genId 재사용 — 포맷 일관성). 충돌 가능성은 무시 가능 수준.
     const id = genId()
     const s = this.store()
     if (!s) {
       throw new Error('이 환경에서는 localStorage를 사용할 수 없어 로컬 공유를 저장하지 못했습니다.')
     }
+    // 실제 백엔드와 동일하게 다중 해상도를 생성해 저장(뷰어를 같은 경로로 검증). srcs 생성 + 원본 src 비움.
+    const shared = await attachSrcSets(board, { onProgress: opts?.onProgress })
     // board.ts의 serialize로 직렬화(저장 포맷 단일 진실). 쿼터 초과는 친절한 메시지로 변환(bug-io P2).
     try {
-      s.setItem(STORAGE_PREFIX + id, serialize(board))
+      s.setItem(STORAGE_PREFIX + id, serialize(shared))
     } catch {
       throw new Error('용량 초과로 로컬 공유를 저장하지 못했습니다(이미지가 많은 보드는 .refb 저장을 권장).')
     }
@@ -87,17 +118,34 @@ export class LocalShareAdapter implements ShareAdapter {
     return this.baseUrl + buildShareHash(id)
   }
 
-  async load(id: string): Promise<BoardState | null> {
+  async load(id: string): Promise<LoadResult> {
     const s = this.store()
-    if (!s) return null
+    if (!s) return { ok: false, reason: 'not-found' }
     const json = s.getItem(STORAGE_PREFIX + id)
-    if (json === null) return null // 미존재/만료/오타 → null(throw 아님, 호출측이 "없음"을 분기).
+    if (json === null) return { ok: false, reason: 'not-found' } // 미존재/만료/오타
     try {
-      return deserialize(json)
+      return { ok: true, board: deserialize(json) }
     } catch {
-      // 저장 데이터 손상 → null로 간주(앱이 죽지 않도록).
-      return null
+      // 저장 데이터 손상 → 없음으로 간주(앱이 죽지 않도록).
+      return { ok: false, reason: 'not-found' }
     }
+  }
+
+  // ---- 목업 인증: 항상 로그인된 것처럼 동작(같은 브라우저 왕복 검증용) ----
+  async getCurrentUser(): Promise<ShareUser | null> {
+    return { email: 'local@refboard' }
+  }
+  async signIn(): Promise<void> {
+    /* 목업: 로그인 불필요 */
+  }
+  async signInWithEmail(_email: string): Promise<void> {
+    /* 목업: 로그인 불필요 */
+  }
+  async signOut(): Promise<void> {
+    /* 목업: 세션 없음 */
+  }
+  async setAllowlist(_id: string, _emails: string[]): Promise<void> {
+    /* 목업: 허용목록 없음(로컬은 항상 열림) */
   }
 }
 

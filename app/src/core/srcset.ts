@@ -77,8 +77,9 @@ export async function buildSrcSet(src: string, opts: SrcSetOptions = {}): Promis
 
 /**
  * 보드의 모든 이미지 아이템에 srcs(다중 해상도)를 채운 새 BoardState를 만든다.
- * 원본 board는 변경하지 않는다(깊은 복제 후 srcs만 추가). 공유 export 직전에 호출한다.
- * crop/GIF 이미지는 좌표·애니 정합 문제로 건너뛴다(→ 뷰어가 src로 폴백).
+ * 원본 board는 변경하지 않는다(깊은 복제). srcs를 채운 아이템은 원본 src를 ''로 비워
+ * 공유 저장/전송 용량이 2배가 되는 것을 막는다(P1#4). 공유 export 직전에 호출한다.
+ * crop/GIF 이미지는 좌표·애니 정합 문제로 건너뛴다(→ src 유지, 뷰어가 src로 폴백).
  * @param opts.onProgress (done, total) 진행 콜백(이미지가 많을 때 UI 표시용, 선택)
  */
 export async function attachSrcSets(
@@ -103,6 +104,10 @@ export async function attachSrcSets(
   // (한 장당 buildSrcSet 내부에서 3해상도는 병렬, 장끼리는 순차로 균형.)
   for (const img of targets) {
     img.srcs = await buildSrcSet(img.src, opts)
+    // 원본 data URL 제거 — srcs(thumb/medium/orig)로 대체되어 불필요(P1#4: 잔류 시 공유 저장/전송 용량 2배).
+    // srcs가 채워진 이 아이템만 비운다. crop/GIF·구보드는 targets에서 제외돼 src를 유지하므로
+    // 뷰어 폴백(scene: srcs?.medium ?? src, lightbox: srcs?.orig ?? src)이 깨지지 않는다.
+    img.src = ''
     done++
     opts.onProgress?.(done, total)
   }
