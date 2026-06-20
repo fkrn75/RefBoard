@@ -13,8 +13,20 @@ interface BeforeInstallPromptEvent extends Event {
 // swUrl 기본값은 '/sw.js'(public 루트에 배치 → 사이트 전체를 스코프로).
 export async function registerServiceWorker(swUrl: string = '/sw.js'): Promise<void> {
   if (!('serviceWorker' in navigator)) return
+  // 최초 설치(직전 controller 없음)에서는 reload가 불필요 — 재배포로 SW가 교체될 때만 1회 reload하려고 캡처.
+  const hadController = !!navigator.serviceWorker.controller
   try {
-    await navigator.serviceWorker.register(swUrl, { scope: '/' })
+    // updateViaCache:'none' — 브라우저 HTTP 캐시로 sw.js 본문 갱신이 늦어지는 것을 막아 새 버전을 빨리 감지.
+    const reg = await navigator.serviceWorker.register(swUrl, { scope: '/', updateViaCache: 'none' })
+    let reloaded = false
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      // 최초 설치 제외 + 1회만 — 새 SW가 제어를 인수하면 최신 자산으로 한 번 새로고침(수동 Ctrl+Shift+R 불필요).
+      if (reloaded || !hadController) return
+      reloaded = true
+      window.location.reload()
+    })
+    // 탭이 떠 있는 동안에도 새 배포를 감지하도록 즉시 업데이트 확인.
+    void reg.update()
   } catch (err) {
     // 등록 실패는 치명적이지 않다(오프라인 캐시만 비활성). 콘솔에만 남긴다.
     console.warn('[pwa] 서비스워커 등록 실패:', err)

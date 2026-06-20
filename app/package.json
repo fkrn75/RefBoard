@@ -6,7 +6,7 @@
   "description": "RefBoard - PureRef 호환 레퍼런스 보드 (웹 캔버스 본체, 나중에 Tauri로 감쌈)",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && node scripts/stamp-sw.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

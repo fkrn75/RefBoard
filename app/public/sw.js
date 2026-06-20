@@ -3,13 +3,15 @@
 // 전략:
 //  1) 앱 셸(/, manifest, 아이콘)을 install 시 precache.
 //  2) 내비게이션 요청(HTML)은 network-first → 오프라인이면 캐시된 셸('/')로 폴백(SPA).
-//  3) 그 외 GET(JS/CSS/이미지/보드 자산)은 cache-first + 백그라운드 캐시 채움.
+//  3) 그 외 GET(JS/CSS/이미지/보드 자산)은 stale-while-revalidate(캐시 즉시 반환 + 백그라운드 갱신).
 //  4) 버전(CACHE_VERSION)이 바뀌면 activate에서 옛 캐시를 모두 삭제.
 //
 // 주의: Vite 번들 산출물은 파일명에 해시가 붙어 빌드 전엔 목록을 알 수 없으므로
 // precache 대상에 넣지 않고 런타임 캐시(cache-first)로 자연히 채운다.
 
-// 캐시 버전 — 배포 시 올리면 옛 캐시가 정리된다.
+// 캐시 버전 — 프로덕션 빌드 시 scripts/stamp-sw.mjs가 빌드 타임스탬프로 자동 치환한다.
+// (매 배포마다 값이 바뀌어 activate가 옛 캐시를 전부 비움 → 옛 번들 영구잔류·수동 새로고침 문제 제거.)
+// dev(vite)에서는 빌드를 거치지 않으므로 이 기본값이 그대로 쓰인다.
 const CACHE_VERSION = 'v2'
 const SHELL_CACHE = `refboard-shell-${CACHE_VERSION}`
 const RUNTIME_CACHE = `refboard-runtime-${CACHE_VERSION}`
@@ -76,8 +78,8 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
-  // 나머지 동일 출처 GET: cache-first(이미지/번들/보드 자산 오프라인 재생).
-  event.respondWith(cacheFirst(req))
+  // 나머지 동일 출처 GET: stale-while-revalidate(즉시 캐시 반환 + 백그라운드 갱신 → 다음 로드 최신).
+  event.respondWith(staleWhileRevalidate(req))
 })
 
 // network-first: 네트워크 우선, 성공 시 셸 캐시 갱신, 실패 시 캐시('/' 폴백) 사용.
@@ -97,18 +99,19 @@ async function networkFirst(req) {
   }
 }
 
-// cache-first: 캐시에 있으면 즉시 반환, 없으면 네트워크 후 런타임 캐시에 저장.
-async function cacheFirst(req) {
+// stale-while-revalidate: 캐시가 있으면 즉시 반환하고, 동시에 네트워크로 사본을 갱신한다
+// (다음 로드부터 최신). 해시 붙은 번들은 내용 불변이라 안전하고, 비해시 자원(HTML 등)은
+// 한 박자 뒤 최신화된다. CACHE_VERSION 자동 주입(빌드 후처리)과 합쳐 옛 캐시는 activate에서 정리된다.
+async function staleWhileRevalidate(req) {
   const cache = await caches.open(RUNTIME_CACHE)
   const cached = await cache.match(req)
-  if (cached) return cached
-  try {
-    const res = await fetch(req)
-    // ok 응답만 캐시(부분응답 206/오류는 제외).
-    if (res && res.ok && res.status === 200) cache.put(req, res.clone())
-    return res
-  } catch (err) {
-    // 네트워크 실패 & 캐시 미스 — 에러를 그대로 전파(이미지 깨짐 등으로 표시).
-    throw err
-  }
+  // 백그라운드 갱신(실패는 무시하고 캐시로 폴백). ok/200만 캐시(부분응답 206/오류는 제외).
+  const fetching = fetch(req)
+    .then((res) => {
+      if (res && res.ok && res.status === 200) cache.put(req, res.clone())
+      return res
+    })
+    .catch(() => null)
+  // 캐시 우선 즉시 반환, 없으면 네트워크를 기다린다. 둘 다 없으면 에러 전파.
+  return cached || (await fetching) || Promise.reject(new Error('오프라인 상태이며 캐시가 없습니다.'))
 }
