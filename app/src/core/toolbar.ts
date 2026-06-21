@@ -67,6 +67,10 @@ const ICONS = {
   export:
     SVG_HEAD +
     '<path d="M12 15V3"/><path d="M8 7l4-4 4 4"/><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>',
+  // 웹 링크 공유(노드 3개 연결 — 표준 share 아이콘)
+  share:
+    SVG_HEAD +
+    '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>',
   // 테마 전환(반쪽 채운 원 = 명/암)
   theme:
     SVG_HEAD +
@@ -96,6 +100,7 @@ const DEFAULT_BUTTONS: ToolbarButton[] = [
   { actionId: 'file.save', title: '보드 저장 (Ctrl+S)', icon: ICONS.save, group: 'file' },
   { actionId: 'file.import', title: '이미지 가져오기 (Ctrl+I)', icon: ICONS.image, group: 'file' },
   { actionId: 'file.exportScene', title: '내보내기 (Ctrl+E)', icon: ICONS.export, group: 'file' },
+  { actionId: 'share.webLink', title: '웹 뷰어 링크 공유 (Ctrl+Shift+S)', icon: ICONS.share, group: 'file' },
   // 앱/뷰 그룹
   { actionId: 'app.toggleTheme', title: '테마 전환', icon: ICONS.theme, group: 'app' },
   { actionId: 'window.toggleAlwaysOnTop', title: '항상 위에 표시', icon: ICONS.pin, group: 'app', desktopOnly: true },
