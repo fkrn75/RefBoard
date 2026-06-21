@@ -9,7 +9,7 @@
 //  - load: RLS select(0행=권한없음) → medium 7일 서명URL 치환 (P1#6)
 //  - assertNoDataUrls: 업로드 후 jsonb에 data URL 잔존 시 저장 중단 (P1#4)
 
-import type { BoardState } from './board'
+import { isImageItem, type BoardState } from './board'
 import { attachSrcSets } from './srcset'
 import { getSupabase, hasSupabase, BOARDS_BUCKET } from './supabase'
 import { LocalShareAdapter, type LoadResult, type ShareAdapter, type ShareUser, type UploadOptions } from './share-adapter'
@@ -103,7 +103,9 @@ export class SupabaseShareAdapter implements ShareAdapter {
       const shared = await attachSrcSets(board, { onProgress: opts?.onProgress })
 
       for (const it of shared.items) {
-        if (it.type !== 'image') continue
+        // 이미지만 Storage로 분리 업로드한다. 노트/드로잉은 자산이 없으므로 jsonb(data)에
+        // 그대로 동기화된다(아래 update의 shared에 포함). isImageItem 가드로 타입도 좁힌다.
+        if (!isImageItem(it)) continue
         if (it.srcs) {
           // 일반 이미지: thumb/medium만 업로드(orig 기본 미저장, P1#3).
           const thumbKey = `${id}/${it.id}/thumb.webp`
@@ -202,8 +204,9 @@ export class SupabaseShareAdapter implements ShareAdapter {
   private async signUrls(board: BoardState): Promise<void> {
     const keys = new Set<string>()
     const isKey = (s: string) => !!s && !s.startsWith('data:') && !/^https?:/i.test(s) && !s.startsWith('blob:')
+    // 노트/드로잉은 Storage 키가 없으므로 isImageItem으로 걸러 서명 대상에서 제외한다.
     for (const it of board.items) {
-      if (it.type !== 'image') continue
+      if (!isImageItem(it)) continue
       if (it.srcs) {
         for (const k of [it.srcs.thumb, it.srcs.medium, it.srcs.orig]) if (isKey(k)) keys.add(k)
       } else if (it.src && isKey(it.src)) {
@@ -225,7 +228,7 @@ export class SupabaseShareAdapter implements ShareAdapter {
     if (missing.length) console.warn('[뷰어] 서명 URL 누락 키(검정 위험):', missing)
 
     for (const it of board.items) {
-      if (it.type !== 'image') continue
+      if (!isImageItem(it)) continue
       if (it.srcs) {
         it.srcs = {
           thumb: map.get(it.srcs.thumb) ?? it.srcs.thumb,
@@ -277,7 +280,8 @@ function guessExt(dataUrl: string): string {
 // 업로드 후에도 board JSON에 원본 data URL이 남아 있으면 throw(P1#4: DB 폭증·egress 방지).
 function assertNoDataUrls(board: BoardState): void {
   for (const it of board.items) {
-    if (it.type !== 'image') continue
+    // data URL 잔존 검사는 이미지(src/srcs)만 대상. 노트/드로잉은 검사 대상 필드가 없다.
+    if (!isImageItem(it)) continue
     const vals = it.srcs ? [it.srcs.thumb, it.srcs.medium, it.srcs.orig] : []
     if (it.src) vals.push(it.src)
     if (vals.some((v) => typeof v === 'string' && v.startsWith('data:')))

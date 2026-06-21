@@ -39,10 +39,54 @@ export interface BoardImage {
   locked: boolean
   groupId?: string             // 그룹 식별자(같은 값=한 그룹, 없으면 미그룹) — Phase 2.6 그룹
   z: number                    // 캔버스 내 레이어 순서
+  comment?: string             // 이미지에 부착하는 메모(코멘트) — Alt+C로 편집, 없으면 미부착
 }
 
-// 추후 note / group / drawing 아이템 타입을 유니온으로 추가
-export type BoardItem = BoardImage
+// 텍스트 노트 — 보드 위 글자 박스(1차는 평문, 리치텍스트는 추후).
+// 이미지와 동일하게 중심(anchor 0.5) 기준 transform·natural(고유 픽셀 크기)·z를 공유하므로
+// 선택/이동/리사이즈/회전 기즈모에 그대로 편입된다(scene·gizmo 무특화).
+export interface BoardNote {
+  id: string
+  type: 'note'
+  text: string                       // 표시 문자열(평문)
+  fontSize: number                   // 기준 폰트 크기(px, scale=1 기준). 확대는 transform.scale로
+  color: string                      // 글자색(#rrggbb)
+  natural: { w: number; h: number }  // 렌더된 텍스트 박스 크기(측정값). AABB·기즈모 산출 기준
+  transform: Transform
+  opacity: number
+  locked: boolean
+  groupId?: string
+  z: number
+}
+
+// 펜 자유선 / 도형 도구. 지우개는 입력 모드(별도 아이템 아님)라 여기 미포함.
+export type DrawingTool = 'pen' | 'line' | 'rect' | 'ellipse' | 'arrow'
+
+// 드로잉 아이템 — points는 "고유 박스 중심(0,0)" 기준 로컬 좌표.
+// pen=연속점, line/arrow=시작·끝 2점, rect/ellipse=대각 2점.
+// 월드 배치/크기/회전은 transform이 담당(이미지·노트와 동일 모델 → 기즈모 자동 편입).
+export interface BoardDrawing {
+  id: string
+  type: 'drawing'
+  tool: DrawingTool
+  points: { x: number; y: number }[]
+  color: string                      // 선 색(#rrggbb)
+  width: number                      // 선 굵기(px, scale=1 기준)
+  natural: { w: number; h: number }  // 바운딩 박스 크기. AABB·기즈모 산출 기준
+  transform: Transform
+  opacity: number
+  locked: boolean
+  groupId?: string
+  z: number
+}
+
+// 보드 아이템 유니온(추후 group 등 추가 가능)
+export type BoardItem = BoardImage | BoardNote | BoardDrawing
+
+// 타입 가드 — 직렬화(.refb 자산화)·공유 업로드의 "이미지 전용" 분기에서 사용.
+export const isImageItem = (it: BoardItem): it is BoardImage => it.type === 'image'
+export const isNoteItem = (it: BoardItem): it is BoardNote => it.type === 'note'
+export const isDrawingItem = (it: BoardItem): it is BoardDrawing => it.type === 'drawing'
 
 export interface BoardState {
   schema: 'refboard/1.0'

@@ -18,7 +18,7 @@ export interface ToolbarButton {
   actionId: string // keymap 액션 id와 동일 문자열(예: 'file.save'). 클릭 시 onAction(actionId) 호출
   title: string // 호버 툴팁(접근성 aria-label 겸용)
   icon: string // 인라인 SVG 마크업 문자열(아래 ICONS 참조). 비우면 title 첫 글자를 텍스트로 표시
-  group?: 'file' | 'edit' | 'view' | 'app' // 같은 그룹끼리 묶고 그룹 사이에 구분선을 넣는다
+  group?: 'file' | 'edit' | 'view' | 'tools' | 'app' // 같은 그룹끼리 묶고 그룹 사이에 구분선을 넣는다
   desktopOnly?: boolean // true면 데스크탑(Tauri)에서만 노출. opts.isDesktop=false면 렌더 생략
 }
 
@@ -86,6 +86,34 @@ const ICONS = {
   settings:
     SVG_HEAD +
     '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>',
+  // ---- 도구(tools) 그룹 아이콘 (Phase: 텍스트·드로잉·댓글) ----
+  // 선택(화살표 커서) — 기본 도구
+  cursor:
+    SVG_HEAD + '<path d="M5 3l6 16 2.2-6.2L20 10.6z"/></svg>',
+  // 텍스트(대문자 T)
+  text:
+    SVG_HEAD + '<path d="M5 5h14"/><path d="M12 5v14"/><path d="M9 19h6"/></svg>',
+  // 펜(자유선 — 만년필 촉)
+  pen:
+    SVG_HEAD + '<path d="M15 4l5 5L9 20l-5 1 1-5z"/><path d="M13 6l5 5"/></svg>',
+  // 직선
+  line:
+    SVG_HEAD + '<path d="M5 19L19 5"/></svg>',
+  // 사각형
+  rect:
+    SVG_HEAD + '<rect x="4" y="6" width="16" height="12" rx="1"/></svg>',
+  // 타원
+  ellipse:
+    SVG_HEAD + '<ellipse cx="12" cy="12" rx="9" ry="6"/></svg>',
+  // 화살표(우상향)
+  arrow:
+    SVG_HEAD + '<path d="M5 19L19 5"/><path d="M10 5h9v9"/></svg>',
+  // 지우개
+  eraser:
+    SVG_HEAD + '<path d="M16 3l5 5L10 19H5l-2-2z"/><path d="M8 21h12"/></svg>',
+  // 댓글(말풍선)
+  comment:
+    SVG_HEAD + '<path d="M4 5h16v11H9l-4 4V5z"/></svg>',
 } as const
 
 // ---- 기본 버튼 카탈로그 ----
@@ -101,6 +129,16 @@ const DEFAULT_BUTTONS: ToolbarButton[] = [
   { actionId: 'file.import', title: '이미지 가져오기 (Ctrl+I)', icon: ICONS.image, group: 'file' },
   { actionId: 'file.exportScene', title: '내보내기 (Ctrl+E)', icon: ICONS.export, group: 'file' },
   { actionId: 'share.webLink', title: '웹 뷰어 링크 공유 (Ctrl+Shift+S)', icon: ICONS.share, group: 'file' },
+  // 도구 그룹 — 클릭하면 activeTool을 바꾼다(main.ts runAction에서 set). 활성 도구는 rb-active로 강조.
+  { actionId: 'tool.select', title: '선택 도구 (V)', icon: ICONS.cursor, group: 'tools' },
+  { actionId: 'tool.text', title: '텍스트 (T)', icon: ICONS.text, group: 'tools' },
+  { actionId: 'tool.pen', title: '펜 (P)', icon: ICONS.pen, group: 'tools' },
+  { actionId: 'tool.line', title: '직선 (L)', icon: ICONS.line, group: 'tools' },
+  { actionId: 'tool.rect', title: '사각형 (R)', icon: ICONS.rect, group: 'tools' },
+  { actionId: 'tool.ellipse', title: '타원 (O)', icon: ICONS.ellipse, group: 'tools' },
+  { actionId: 'tool.arrow', title: '화살표 (A)', icon: ICONS.arrow, group: 'tools' },
+  { actionId: 'tool.eraser', title: '드로잉 지우개 (E)', icon: ICONS.eraser, group: 'tools' },
+  { actionId: 'comment.edit', title: '선택 이미지에 댓글 (Alt+C)', icon: ICONS.comment, group: 'tools' },
   // 앱/뷰 그룹
   { actionId: 'app.toggleTheme', title: '테마 전환', icon: ICONS.theme, group: 'app' },
   { actionId: 'window.toggleAlwaysOnTop', title: '항상 위에 표시', icon: ICONS.pin, group: 'app', desktopOnly: true },

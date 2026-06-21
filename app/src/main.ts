@@ -1,5 +1,16 @@
 import { Scene, type ScenePointer, type Rect } from './core/scene'
-import { createEmptyBoard, genId, type BoardImage, type BoardState, type Transform } from './core/board'
+import {
+  createEmptyBoard,
+  genId,
+  isImageItem,
+  type BoardImage,
+  type BoardItem,
+  type BoardNote,
+  type BoardDrawing,
+  type DrawingTool,
+  type BoardState,
+  type Transform,
+} from './core/board'
 import { Selection } from './core/selection'
 import { packImages } from './core/pack'
 import { loadBoardFile, loadBoardBlob, pickRefbFile } from './core/io'
@@ -56,6 +67,98 @@ let cam = { ...board.camera }
 // 버튼 클릭은 모두 runAction(키맵과 동일 actionId)으로 흘려보내 단축키와 동작을 일원화한다.
 const toolbar = createToolbar({ onAction: (id) => runAction(id), isDesktop: isDesktop() })
 
+// ---- 활성 도구(텍스트·드로잉) 상태 ----
+// 'select'(기본)에서만 기존 선택/이동/러버밴드/기즈모가 동작한다. 나머지 도구는 캔버스 입력을
+// 자기 동작(텍스트 배치 · 드로잉 드래그 · 지우개)으로 가로챈다(scene.onPointer* 진입부에서 분기).
+type ActiveTool = 'select' | 'text' | 'pen' | 'line' | 'rect' | 'ellipse' | 'arrow' | 'eraser'
+let activeTool: ActiveTool = 'select'
+// 드로잉 기본 스타일(scale=1 기준). 이후 우클릭 팔레트 등으로 노출 가능(현재는 고정값).
+const DRAW_COLOR = '#ff5a5a'
+const DRAW_WIDTH = 4
+const TEXT_COLOR = '#ffffff'
+const TEXT_FONT_SIZE = 28
+
+// 도구 버튼 활성 표시를 현재 activeTool에 맞춰 토글한다(선택 도구 포함, 한 번에 하나만 강조).
+const TOOL_ACTION_IDS: Record<ActiveTool, string> = {
+  select: 'tool.select',
+  text: 'tool.text',
+  pen: 'tool.pen',
+  line: 'tool.line',
+  rect: 'tool.rect',
+  ellipse: 'tool.ellipse',
+  arrow: 'tool.arrow',
+  eraser: 'tool.eraser',
+}
+function setActiveTool(tool: ActiveTool) {
+  if (activeTool === tool) return
+  // 진행 중이던 드로잉/텍스트 편집은 도구 전환 시 정리(취소).
+  cancelDrawing()
+  commitNoteEditor() // 편집 중 텍스트가 있으면 확정 후 전환
+  activeTool = tool
+  for (const t of Object.keys(TOOL_ACTION_IDS) as ActiveTool[]) {
+    toolbar.setActive(TOOL_ACTION_IDS[t], t === tool)
+  }
+  // 커서 힌트: 드로잉/텍스트는 십자, 지우개는 not-allowed 느낌, 선택은 기본.
+  host.style.cursor = tool === 'select' ? '' : tool === 'eraser' ? 'cell' : 'crosshair'
+  scene.setCursor(tool === 'select' ? 'grab' : 'crosshair')
+  showToast(TOOL_HINT[tool], true)
+}
+const TOOL_HINT: Record<ActiveTool, string> = {
+  select: '선택 도구',
+  text: '텍스트: 캔버스를 클릭해 입력 · 노트 더블클릭으로 재편집',
+  pen: '펜: 드래그해 자유선 그리기',
+  line: '직선: 드래그',
+  rect: '사각형: 드래그',
+  ellipse: '타원: 드래그',
+  arrow: '화살표: 드래그',
+  eraser: '지우개: 드로잉을 클릭/드래그해 삭제',
+}
+
+// ---- 드로잉 미리보기 오버레이(2D 캔버스) ----
+// scene(PixiJS)은 직접 수정 금지라, 드래그 중 임시 도형은 host 위에 얹는 별도 2D 캔버스에 그린다.
+// 좌표는 월드→화면(world*zoom + cam)으로 환산. 확정(pointerup) 시 지우고 실제 BoardDrawing을 scene에 추가한다.
+const previewCanvas = document.createElement('canvas')
+previewCanvas.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;z-index:40'
+host.appendChild(previewCanvas)
+const previewCtx = previewCanvas.getContext('2d')
+function resizePreviewCanvas() {
+  const dpr = globalThis.devicePixelRatio || 1
+  previewCanvas.width = Math.round(host.clientWidth * dpr)
+  previewCanvas.height = Math.round(host.clientHeight * dpr)
+  previewCanvas.style.width = host.clientWidth + 'px'
+  previewCanvas.style.height = host.clientHeight + 'px'
+  if (previewCtx) previewCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+}
+resizePreviewCanvas()
+window.addEventListener('resize', resizePreviewCanvas)
+function clearPreview() {
+  if (previewCtx) previewCtx.clearRect(0, 0, host.clientWidth, host.clientHeight)
+}
+// 월드 좌표 → 화면(미리보기 캔버스) 좌표.
+function worldToScreen(wx: number, wy: number): { x: number; y: number } {
+  return { x: wx * cam.zoom + cam.x, y: wy * cam.zoom + cam.y }
+}
+
+// 기즈모/선택 외곽선 산출용 "표시 박스 크기"(scale=1 기준 natural).
+// 이미지는 크롭 반영(croppedSize), 노트/드로잉은 측정/바운딩 박스(natural) 그대로.
+function itemDisplaySize(item: BoardItem): { w: number; h: number } {
+  return isImageItem(item) ? croppedSize(item.crop, item.natural) : item.natural
+}
+
+// 아이템의 transform/opacity/z 변경을 scene 노드에 반영(타입 무관).
+// 이미지=applyTransform(Sprite), 노트=updateNote, 드로잉=updateDrawing. getSprite는 이미지에만
+// 노드를 돌려주므로, 노트/드로잉 이동·변형도 화면에 반영되도록 타입별 경로로 분기한다.
+function syncNode(item: BoardItem) {
+  if (item.type === 'note') {
+    scene.updateNote(item)
+  } else if (item.type === 'drawing') {
+    scene.updateDrawing(item)
+  } else {
+    const s = scene.getSprite(item.id)
+    if (s) scene.applyTransform(s, item)
+  }
+}
+
 // ---- 대량 이미지 가상화(4.6): 가시영역 밖 GPU 텍스처 언로드 ----
 const virt = createVirtualizer({
   getItems: () =>
@@ -89,7 +192,7 @@ sel.onChange(() => {
   scene.drawSelection(sel.values(), lockedIdSet())
   refreshGizmo()
   syncOpacityControl()
-  toolbar.updateStatus({ selCount: sel.values().length, total: board.items.length })
+  toolbar.updateStatus({ selCount: sel.values().length, total: board.items.filter(isImageItem).length })
 })
 
 // ---- UI: 로딩 인디케이터 / 토스트 / 저장상태(dirty) ----
@@ -181,8 +284,7 @@ opacityCtl.onInput = (v) => {
     const im = board.items.find((i) => i.id === id)
     if (!im) continue
     im.opacity = v
-    const s = scene.getSprite(id)
-    if (s) s.alpha = v
+    syncNode(im) // 이미지=alpha 직접, 노트/드로잉=update*로 반영(타입 무관)
   }
 }
 opacityCtl.onChange = () => {
@@ -215,8 +317,9 @@ function refreshGizmo() {
   if (ids.length === 1) {
     const im = board.items.find((i) => i.id === ids[0])
     if (im && !im.locked) {
-      // 크롭된 이미지는 표시 크기(croppedSize)로 기즈모를 그려 선택 외곽선(texture.frame 기준)과 일치시킨다(bug-core P1).
-      scene.drawGizmo(handlePositions(im.transform, croppedSize(im.crop, im.natural), 30 / cam.zoom))
+      // 크롭된 이미지는 표시 크기(croppedSize)로 기즈모를 그려 선택 외곽선과 일치시킨다(bug-core P1).
+      // 노트/드로잉은 측정/바운딩 박스(natural) 기준.
+      scene.drawGizmo(handlePositions(im.transform, itemDisplaySize(im), 30 / cam.zoom))
       return
     }
   }
@@ -240,7 +343,7 @@ function applyCamHeavy() {
   refreshGizmo() // 핸들 크기/오프셋도 줌 보정
   updateMinimap()
   drawGridIfOn() // 그리드도 보이는 영역 기준 재계산
-  toolbar.updateStatus({ zoom: cam.zoom, selCount: sel.values().length, total: board.items.length })
+  toolbar.updateStatus({ zoom: cam.zoom, selCount: sel.values().length, total: board.items.filter(isImageItem).length })
   virt.update() // 가시영역 재평가 → 텍스처 로드/언로드
 }
 function applyCam() {
@@ -346,9 +449,29 @@ host.addEventListener('pointerup', (e) => {
   }
 })
 host.addEventListener('contextmenu', (e) => e.preventDefault())
-host.addEventListener('dblclick', () => {
+host.addEventListener('dblclick', (e) => {
+  // 선택 도구에서 노트를 더블클릭하면 텍스트 재편집(포커스보다 우선).
+  if (activeTool === 'select') {
+    const rect = host.getBoundingClientRect()
+    const w = scene.screenToWorld(e.clientX - rect.left, e.clientY - rect.top)
+    const note = noteAtWorld(w.x, w.y)
+    if (note && !note.locked) {
+      openNoteEditor({ x: note.transform.x, y: note.transform.y }, note)
+      return
+    }
+  }
   if (sel.size > 0 || scene.allIds().length > 0) focusSelected()
 })
+
+// 월드 좌표에 적중하는 "노트"를 위(z 큰 것)부터 찾는다(더블클릭 재편집용).
+function noteAtWorld(wx: number, wy: number): BoardNote | null {
+  const notes = board.items.filter((i): i is BoardNote => i.type === 'note').sort((a, b) => b.z - a.z)
+  for (const n of notes) {
+    const a = scene.getItemAABB(n.id)
+    if (a && wx >= a.minX && wx <= a.maxX && wy >= a.minY && wy <= a.maxY) return n
+  }
+  return null
+}
 
 // ---- 선택 + 이동 + 러버밴드 + 기즈모 변형 (PixiJS 좌클릭 이벤트) ----
 type DragState =
@@ -367,10 +490,26 @@ let drag: DragState = null
 scene.onPointerDown = (p: ScenePointer) => {
   if (canvasLocked) return // 캔버스 잠금 중에는 편집(선택/이동/변형) 차단 — 팬·줌·단축키는 유지
   if (p.button !== 0) return // 좌클릭만 (우클릭은 팬)
+  // 0a) 활성 도구가 'select'가 아니면 도구별 동작으로 가로챈다(기존 선택/이동/기즈모로 진행하지 않음).
+  if (activeTool === 'text') {
+    // 텍스트 도구: 클릭 지점에 입력기 띄움(중심=클릭 월드좌표).
+    openNoteEditor(p.world)
+    return
+  }
+  if (activeTool === 'eraser') {
+    eraseAt(p.hitId) // 클릭 적중 드로잉 삭제 + 이후 드래그도 onPointerMove에서 지움
+    return
+  }
+  if (activeTool !== 'select') {
+    // 펜/직선/사각형/타원/화살표: 드래그 시작.
+    drawState = { tool: activeTool as DrawingTool, points: [{ x: p.world.x, y: p.world.y }], committed: false }
+    renderDrawPreview()
+    return
+  }
   // 0) 크롭 모드: 대상 이미지 기준 드래그 시작점(원본픽셀) 기록
   if (cropMode && cropTargetId) {
     const im = board.items.find((i) => i.id === cropTargetId)
-    if (im) {
+    if (im && isImageItem(im)) {
       cropDrag = { startPix: worldToPixel(im, p.world.x, p.world.y), startWorld: p.world }
       return
     }
@@ -380,7 +519,7 @@ scene.onPointerDown = (p: ScenePointer) => {
     const gid = sel.values()[0]
     const gim = board.items.find((i) => i.id === gid)
     if (gim && !gim.locked) {
-      const handles = handlePositions(gim.transform, croppedSize(gim.crop, gim.natural), 30 / cam.zoom)
+      const handles = handlePositions(gim.transform, itemDisplaySize(gim), 30 / cam.zoom)
       const hit = hitTest(p.world, handles, 9 / cam.zoom)
       if (hit) {
         drag = { mode: 'gizmo', handle: hit, id: gid, t0: { ...gim.transform }, start: p.world, committed: false }
@@ -415,6 +554,40 @@ scene.onPointerDown = (p: ScenePointer) => {
 }
 
 scene.onPointerMove = (p: ScenePointer) => {
+  // 드로잉 도구: 드래그 중 점 수집 + 미리보기.
+  if (drawState) {
+    if (drawState.tool === 'pen') drawState.points.push({ x: p.world.x, y: p.world.y })
+    else {
+      // 2점 도형: 끝점만 갱신(시작점 유지). Shift=수평/수직/45° 제약.
+      let ex = p.world.x
+      let ey = p.world.y
+      if (p.shift) {
+        const s0 = drawState.points[0]
+        const dx = ex - s0.x
+        const dy = ey - s0.y
+        if (drawState.tool === 'line' || drawState.tool === 'arrow') {
+          // 가장 가까운 45° 방향으로 스냅.
+          const ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4)
+          const len = Math.hypot(dx, dy)
+          ex = s0.x + Math.cos(ang) * len
+          ey = s0.y + Math.sin(ang) * len
+        } else {
+          // rect/ellipse: 정사각형/정원(짧은 변에 맞춤).
+          const m = Math.min(Math.abs(dx), Math.abs(dy))
+          ex = s0.x + Math.sign(dx) * m
+          ey = s0.y + Math.sign(dy) * m
+        }
+      }
+      drawState.points = [drawState.points[0], { x: ex, y: ey }]
+    }
+    renderDrawPreview()
+    return
+  }
+  // 지우개: 버튼을 누른 채 이동하면 지나가는 드로잉을 계속 삭제(드래그 지우기).
+  if (activeTool === 'eraser') {
+    if (p.hitId) eraseAt(p.hitId)
+    return
+  }
   // 크롭 모드: 드래그 사각형 미리보기(월드 좌표)
   if (cropMode) {
     if (cropDrag) scene.drawRubber(rectOf(cropDrag.startWorld, p.world))
@@ -432,13 +605,12 @@ scene.onPointerMove = (p: ScenePointer) => {
     if (gd.handle === 'rotate') {
       im.transform.rotation = rotateFromPointer(gd.t0, gd.start, p.world, p.shift).rotation
     } else {
-      const r = scaleFromHandle(gd.handle, gd.t0, croppedSize(im.crop, im.natural), gd.start, p.world, { centered: p.alt })
+      const r = scaleFromHandle(gd.handle, gd.t0, itemDisplaySize(im), gd.start, p.world, { centered: p.alt })
       im.transform.scale = r.scale
       im.transform.x = r.x
       im.transform.y = r.y
     }
-    const s = scene.getSprite(gd.id)
-    if (s) scene.applyTransform(s, im)
+    syncNode(im)
     afterEdit()
     return
   }
@@ -458,8 +630,7 @@ scene.onPointerMove = (p: ScenePointer) => {
       if (!img) continue
       img.transform.x = o.x + dx
       img.transform.y = o.y + dy
-      const s = scene.getSprite(id)
-      if (s) scene.applyTransform(s, img)
+      syncNode(img)
     }
     // 스냅(켜졌을 때): 대표(첫) 아이템 기준 보정량을 전 선택에 적용. 이웃 우선→그리드.
     if (snapOn && drag.origins.size > 0) {
@@ -475,8 +646,7 @@ scene.onPointerMove = (p: ScenePointer) => {
             if (!img) continue
             img.transform.x = o.x + dx + adj.dx
             img.transform.y = o.y + dy + adj.dy
-            const s = scene.getSprite(id)
-            if (s) scene.applyTransform(s, img)
+            syncNode(img)
           }
         }
       }
@@ -488,11 +658,17 @@ scene.onPointerMove = (p: ScenePointer) => {
 }
 
 scene.onPointerUp = (p: ScenePointer) => {
+  // 드로잉 도구: 드래그 종료 → BoardDrawing 확정.
+  if (drawState) {
+    void finishDrawing()
+    return
+  }
+  if (activeTool === 'eraser') return // 지우개는 down/move에서 처리, up은 무시
   // 크롭 모드: 드래그 영역을 원본픽셀 크롭으로 확정(크롭 영역은 제자리 유지)
   if (cropMode) {
     if (cropDrag && cropTargetId) {
       const im = board.items.find((i) => i.id === cropTargetId)
-      if (im) {
+      if (im && isImageItem(im)) {
         const endPix = worldToPixel(im, p.world.x, p.world.y)
         const nc = cropRectFromDrag(cropDrag.startPix, endPix, im.natural)
         if (nc.w > 4 && nc.h > 4) {
@@ -503,8 +679,7 @@ scene.onPointerUp = (p: ScenePointer) => {
           im.transform.x = wc.x
           im.transform.y = wc.y
           scene.applyCrop(im.id, im)
-          const s = scene.getSprite(im.id)
-          if (s) scene.applyTransform(s, im)
+          syncNode(im)
           afterEdit()
         }
       }
@@ -546,7 +721,7 @@ function deleteSelected() {
   if (ids.length === 0) return
   commit()
   for (const id of ids) {
-    scene.removeImage(id)
+    scene.removeItem(id) // 이미지·노트·드로잉 모두 제거(타입 무관)
     const idx = board.items.findIndex((i) => i.id === id)
     if (idx >= 0) board.items.splice(idx, 1)
   }
@@ -565,13 +740,14 @@ async function duplicateSelected() {
   for (const id of ids) {
     const src = board.items.find((i) => i.id === id)
     if (!src) continue
-    const copy = structuredClone(src) as BoardImage
+    // 타입 무관 깊은 복사(이미지/노트/드로잉). id·z·위치만 새로 부여.
+    const copy = structuredClone(src) as BoardItem
     copy.id = genId()
     copy.z = board.items.length
     copy.transform.x += 24
     copy.transform.y += 24
     board.items.push(copy)
-    await scene.addImage(copy)
+    await scene.addItem(copy) // 타입에 맞게 sprite/text/graphics 추가
     newIds.push(copy.id)
   }
   sel.set(newIds)
@@ -597,14 +773,13 @@ function packAll() {
     if (!im || !p) continue
     im.transform.x = center.x + p.x
     im.transform.y = center.y + p.y
-    const s = scene.getSprite(id)
-    if (s) scene.applyTransform(s, im)
+    syncNode(im)
   }
   fitAll()
 }
 
 // z순서 변경 공통: 히스토리 적재 → 모듈 호출 → zIndex 동기화
-function applyZOrder(fn: (items: BoardImage[], ids: Set<string> | string[]) => void) {
+function applyZOrder(fn: (items: BoardItem[], ids: Set<string> | string[]) => void) {
   if (sel.size === 0) return
   commit()
   fn(board.items, sel.values())
@@ -627,8 +802,7 @@ function flipSelected(axis: 'x' | 'y') {
     if (!img) continue
     if (axis === 'x') img.transform.flipX = !img.transform.flipX
     else img.transform.flipY = !img.transform.flipY
-    const s = scene.getSprite(id)
-    if (s) scene.applyTransform(s, img)
+    syncNode(img)
   }
 }
 
@@ -688,6 +862,316 @@ function drawGridIfOn() {
   else scene.drawGrid(null)
 }
 
+// ============================================================================
+// 텍스트 / 펜·도형 드로잉 / 댓글 (Phase: 텍스트·드로잉·댓글)
+// ============================================================================
+
+// ---- 드로잉(펜/도형) 입력 ----
+// 드래그하는 동안 월드 좌표 점을 모은다. 펜=연속점, line/rect/ellipse/arrow=시작·끝 2점만 갱신.
+let drawState: { tool: DrawingTool; points: { x: number; y: number }[]; committed: boolean } | null = null
+
+// 진행 중인 드로잉을 취소(미리보기만 지우고 아무것도 추가하지 않음).
+function cancelDrawing() {
+  drawState = null
+  clearPreview()
+}
+
+// 현재 drawState를 화면 미리보기 캔버스에 그린다(월드→화면 변환, 화면 픽셀 굵기).
+function renderDrawPreview() {
+  if (!previewCtx || !drawState) return
+  clearPreview()
+  const pts = drawState.points
+  if (pts.length === 0) return
+  const sp = pts.map((p) => worldToScreen(p.x, p.y))
+  previewCtx.save()
+  previewCtx.strokeStyle = DRAW_COLOR
+  previewCtx.fillStyle = DRAW_COLOR
+  previewCtx.lineWidth = Math.max(1, DRAW_WIDTH * cam.zoom)
+  previewCtx.lineCap = 'round'
+  previewCtx.lineJoin = 'round'
+  const a = sp[0]
+  const b = sp[sp.length - 1]
+  previewCtx.beginPath()
+  if (drawState.tool === 'pen') {
+    previewCtx.moveTo(a.x, a.y)
+    for (let i = 1; i < sp.length; i++) previewCtx.lineTo(sp[i].x, sp[i].y)
+    previewCtx.stroke()
+  } else if (drawState.tool === 'line') {
+    previewCtx.moveTo(a.x, a.y)
+    previewCtx.lineTo(b.x, b.y)
+    previewCtx.stroke()
+  } else if (drawState.tool === 'rect') {
+    previewCtx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y))
+  } else if (drawState.tool === 'ellipse') {
+    const cx = (a.x + b.x) / 2
+    const cy = (a.y + b.y) / 2
+    previewCtx.ellipse(cx, cy, Math.abs(b.x - a.x) / 2, Math.abs(b.y - a.y) / 2, 0, 0, Math.PI * 2)
+    previewCtx.stroke()
+  } else if (drawState.tool === 'arrow') {
+    drawArrowPath(previewCtx, a.x, a.y, b.x, b.y, Math.max(1, DRAW_WIDTH * cam.zoom))
+  }
+  previewCtx.restore()
+}
+
+// 화살표(직선 + 머리) 경로를 2D 컨텍스트에 그린다(미리보기 전용).
+function drawArrowPath(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number, w: number) {
+  ctx.beginPath()
+  ctx.moveTo(x1, y1)
+  ctx.lineTo(x2, y2)
+  ctx.stroke()
+  const ang = Math.atan2(y2 - y1, x2 - x1)
+  const head = Math.max(10, w * 3) // 머리 길이(화면 px)
+  const spread = Math.PI / 7
+  ctx.beginPath()
+  ctx.moveTo(x2, y2)
+  ctx.lineTo(x2 - head * Math.cos(ang - spread), y2 - head * Math.sin(ang - spread))
+  ctx.moveTo(x2, y2)
+  ctx.lineTo(x2 - head * Math.cos(ang + spread), y2 - head * Math.sin(ang + spread))
+  ctx.stroke()
+}
+
+// 드래그 종료 → 모은 점으로 BoardDrawing 생성. 바운딩박스 중심을 transform.x/y로,
+// points는 그 중심을 원점(0,0)으로 정규화해 저장한다(scene·gizmo가 natural/transform만 보면 되도록).
+async function finishDrawing() {
+  if (!drawState) return
+  const tool = drawState.tool
+  let pts = drawState.points
+  cancelDrawing()
+  if (pts.length === 0) return
+  // line/arrow/rect/ellipse는 시작·끝 2점만 의미가 있다(중간 이동 흔적 제거).
+  if (tool !== 'pen' && pts.length >= 2) pts = [pts[0], pts[pts.length - 1]]
+  // 바운딩박스 산출.
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x
+    if (p.x > maxX) maxX = p.x
+    if (p.y < minY) minY = p.y
+    if (p.y > maxY) maxY = p.y
+  }
+  let w = maxX - minX
+  let h = maxY - minY
+  // 너무 작은(클릭 수준) 드래그는 도형으로 만들지 않는다.
+  const tiny = 3 / cam.zoom
+  if (tool !== 'pen' && w < tiny && h < tiny) return
+  if (tool === 'pen' && pts.length < 2) return
+  // 선(수평/수직)·점은 박스가 0이 될 수 있어 최소 1로 보정(natural=0이면 AABB/기즈모가 깨짐).
+  w = Math.max(w, 1)
+  h = Math.max(h, 1)
+  const cx = (minX + maxX) / 2
+  const cy = (minY + maxY) / 2
+  // 중심 기준 로컬 좌표로 정규화.
+  const local = pts.map((p) => ({ x: p.x - cx, y: p.y - cy }))
+  const d: BoardDrawing = {
+    id: genId(),
+    type: 'drawing',
+    tool,
+    points: local,
+    color: DRAW_COLOR,
+    width: DRAW_WIDTH,
+    natural: { w, h },
+    transform: { x: cx, y: cy, scale: 1, rotation: 0 },
+    opacity: 1,
+    locked: false,
+    z: board.items.length,
+  }
+  commit()
+  board.items.push(d)
+  scene.addDrawing(d) // 동기(Graphics 반환)
+  hint.style.display = 'none'
+  sel.set([d.id]) // 그린 직후 선택 → 바로 이동/변형 가능
+  updateMinimap()
+}
+
+// 지우개: 클릭/드래그 지점에 적중한 "드로잉" 아이템을 삭제한다(이미지·노트는 보존).
+function eraseAt(hitId: string | null) {
+  if (!hitId) return
+  const idx = board.items.findIndex((i) => i.id === hitId)
+  if (idx < 0) return
+  if (board.items[idx].type !== 'drawing') return // 드로잉만 지운다
+  commit()
+  scene.removeItem(hitId)
+  board.items.splice(idx, 1)
+  normalizeZ(board.items)
+  syncZIndex()
+  sel.clear()
+  updateMinimap()
+  if (board.items.length === 0) hint.style.display = ''
+}
+
+// ---- 텍스트 노트 ----
+// 캔버스 위에 DOM <textarea>를 띄워 입력받고, 확정 시 measureNote로 natural을 구해 BoardNote를 만든다.
+// editingNoteId가 있으면 "기존 노트 재편집", 없으면 "새 노트 생성"이다.
+let noteEditor: HTMLTextAreaElement | null = null
+let editingNoteId: string | null = null
+let noteEditorWorld = { x: 0, y: 0 } // 새 노트의 배치 중심(월드)
+
+// 텍스트 편집기를 연다. world=배치 중심(월드), existing=재편집 대상(없으면 신규).
+function openNoteEditor(world: { x: number; y: number }, existing?: BoardNote) {
+  commitNoteEditor() // 다른 편집기가 떠 있으면 먼저 확정
+  editingNoteId = existing ? existing.id : null
+  noteEditorWorld = world
+  const fontSize = existing ? existing.fontSize : TEXT_FONT_SIZE
+  const color = existing ? existing.color : TEXT_COLOR
+  const ta = document.createElement('textarea')
+  ta.value = existing ? existing.text : ''
+  ta.spellcheck = false
+  ta.rows = 1
+  // 화면 좌표로 배치(중심 기준이므로 좌상단으로 환산은 입력 후 measure 때 처리 — 여기선 클릭점 부근).
+  const sp = worldToScreen(world.x, world.y)
+  // 화면상 폰트크기 = fontSize * zoom. 캔버스 텍스트와 시각적으로 일치시킨다.
+  const screenFont = Math.max(8, fontSize * cam.zoom)
+  ta.style.cssText = [
+    'position:absolute',
+    `left:${sp.x}px`,
+    `top:${sp.y}px`,
+    'transform:translate(-50%,-50%)', // 클릭점을 중심에 맞춤(노트 anchor=0.5와 동일 감각)
+    'z-index:60',
+    'margin:0',
+    'padding:2px 4px',
+    'border:1px dashed var(--rb-accent, #4aa3ff)',
+    'border-radius:4px',
+    'background:rgba(0,0,0,.35)',
+    `color:${color}`,
+    `font:${screenFont}px system-ui,-apple-system,Segoe UI,sans-serif`,
+    'line-height:1.2',
+    'white-space:pre',
+    'overflow:hidden',
+    'resize:none',
+    'min-width:1ch',
+    'outline:none',
+    'caret-color:var(--rb-accent, #4aa3ff)',
+  ].join(';')
+  host.appendChild(ta)
+  noteEditor = ta
+  // 입력에 맞춰 textarea 폭/높이 자동 확장(시각적 편집 편의).
+  const autosize = () => {
+    ta.style.width = 'auto'
+    ta.style.height = 'auto'
+    ta.style.width = Math.max(ta.scrollWidth + 4, 16) + 'px'
+    ta.style.height = ta.scrollHeight + 'px'
+  }
+  ta.addEventListener('input', autosize)
+  // Enter=확정(줄바꿈은 Shift+Enter), Esc=취소.
+  ta.addEventListener('keydown', (e) => {
+    e.stopPropagation() // 캔버스 단축키로 새지 않게(입력 필드 보호는 window keydown에도 있지만 이중 안전).
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      commitNoteEditor()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      cancelNoteEditor()
+    }
+  })
+  // 포커스 잃으면 확정(다른 곳 클릭 시 자연스럽게 마무리).
+  ta.addEventListener('blur', () => commitNoteEditor())
+  // 재편집이면 해당 노트의 스프라이트를 잠시 숨겨 편집 중 이중 표시를 막는다.
+  if (existing) {
+    const s = scene.getSprite(existing.id)
+    if (s) s.visible = false
+  }
+  setTimeout(() => {
+    ta.focus()
+    autosize()
+  }, 0)
+}
+
+// 편집기를 닫고 정리한다(스프라이트 재표시 포함).
+function disposeNoteEditor() {
+  if (!noteEditor) return
+  const ed = noteEditor
+  noteEditor = null
+  ed.remove()
+  if (editingNoteId) {
+    const s = scene.getSprite(editingNoteId)
+    if (s) s.visible = true
+  }
+  editingNoteId = null
+}
+
+// 텍스트 입력을 확정한다. 빈 문자열이면 (신규는 생성 안 함 / 기존은 삭제).
+function commitNoteEditor() {
+  if (!noteEditor) return
+  const text = noteEditor.value.replace(/\s+$/g, '') // 끝 공백/개행 정리
+  const id = editingNoteId
+  disposeNoteEditor()
+  if (id) {
+    // 재편집: 기존 노트 갱신(빈 텍스트면 삭제).
+    const note = board.items.find((i) => i.id === id)
+    if (!note || note.type !== 'note') return
+    if (text.length === 0) {
+      commit()
+      scene.removeItem(id)
+      const idx = board.items.findIndex((i) => i.id === id)
+      if (idx >= 0) board.items.splice(idx, 1)
+      normalizeZ(board.items)
+      syncZIndex()
+      sel.clear()
+      updateMinimap()
+      if (board.items.length === 0) hint.style.display = ''
+      return
+    }
+    if (text === note.text) return // 변경 없음 → 히스토리 적재 안 함
+    commit()
+    note.text = text
+    // updateNote가 다시 그린 실제 측정 크기를 돌려주므로 그 값으로 natural을 맞춘다(측정 일원화).
+    const m = scene.updateNote(note)
+    if (m) note.natural = m
+    else note.natural = scene.measureNote(text, note.fontSize, note.color)
+    afterEdit()
+  } else {
+    // 신규: 빈 텍스트는 무시.
+    if (text.length === 0) return
+    const natural = scene.measureNote(text, TEXT_FONT_SIZE, TEXT_COLOR)
+    const note: BoardNote = {
+      id: genId(),
+      type: 'note',
+      text,
+      fontSize: TEXT_FONT_SIZE,
+      color: TEXT_COLOR,
+      natural,
+      transform: { x: noteEditorWorld.x, y: noteEditorWorld.y, scale: 1, rotation: 0 },
+      opacity: 1,
+      locked: false,
+      z: board.items.length,
+    }
+    commit()
+    board.items.push(note)
+    void scene.addNote(note)
+    hint.style.display = 'none'
+    sel.set([note.id])
+    updateMinimap()
+  }
+}
+
+// 텍스트 편집 취소(신규=버림, 기존=원본 유지).
+function cancelNoteEditor() {
+  disposeNoteEditor()
+}
+
+// ---- 댓글(이미지에 부착하는 메모) ----
+// 선택한 단일 이미지에 comment 텍스트를 prompt로 입력/수정한다(가벼운 표시 — 본격 UI는 추후).
+function editComment() {
+  const ids = sel.values()
+  if (ids.length !== 1) {
+    showToast('댓글은 이미지 1개를 선택했을 때 가능합니다', true)
+    return
+  }
+  const im = board.items.find((i) => i.id === ids[0])
+  if (!im || !isImageItem(im)) {
+    showToast('댓글은 이미지에만 달 수 있습니다', true)
+    return
+  }
+  const cur = im.comment ?? ''
+  const next = window.prompt('이미지 댓글(메모) · 비우면 삭제', cur)
+  if (next === null) return // 취소
+  const trimmed = next.trim()
+  commit()
+  if (trimmed.length === 0) delete im.comment
+  else im.comment = trimmed
+  setDirty(true)
+  showToast(trimmed.length === 0 ? '댓글 삭제됨' : '댓글 저장됨', true)
+}
+
 // ---- 크롭 (Phase 2.2, 비파괴) ----
 let cropMode = false
 let cropTargetId: string | null = null
@@ -727,6 +1211,11 @@ function enterCropMode() {
     return
   }
   const target = board.items.find((i) => i.id === sel.values()[0])
+  // 크롭은 이미지 전용(노트/드로잉은 비파괴 크롭 개념이 없다).
+  if (target && !isImageItem(target)) {
+    showToast('크롭은 이미지에만 적용할 수 있습니다', true)
+    return
+  }
   // 회전된 이미지는 화면축 드래그 사각형과 원본픽셀 크롭이 어긋나므로 차단한다(bug-core P1).
   // (변형 리셋으로 회전을 0으로 되돌린 뒤 크롭하면 된다.)
   if (target && target.transform.rotation !== 0) {
@@ -752,11 +1241,10 @@ function resetCrop() {
   commit()
   for (const id of ids) {
     const im = board.items.find((i) => i.id === id)
-    if (!im || !im.crop) continue
+    if (!im || !isImageItem(im) || !im.crop) continue // 크롭은 이미지에만 존재
     delete im.crop
     scene.applyCrop(id, im)
-    const s = scene.getSprite(id)
-    if (s) scene.applyTransform(s, im)
+    syncNode(im)
   }
   afterEdit()
 }
@@ -772,8 +1260,7 @@ function resetTransform() {
     im.transform.rotation = 0
     im.transform.flipX = false
     im.transform.flipY = false
-    const s = scene.getSprite(id)
-    if (s) scene.applyTransform(s, im)
+    syncNode(im)
   }
   afterEdit()
 }
@@ -794,8 +1281,7 @@ function applyDeltas(deltas: Map<string, { dx: number; dy: number }>) {
     if (!im) continue
     im.transform.x += d.dx
     im.transform.y += d.dy
-    const s = scene.getSprite(id)
-    if (s) scene.applyTransform(s, im)
+    syncNode(im)
   }
 }
 function doAlign(edge: 'left' | 'right' | 'top' | 'bottom' | 'hcenter' | 'vcenter') {
@@ -820,8 +1306,7 @@ function doNormalize(mode: 'width' | 'height' | 'scale') {
     const im = board.items.find((i) => i.id === id)
     if (!im) continue
     im.transform.scale = sc.scale
-    const s = scene.getSprite(id)
-    if (s) scene.applyTransform(s, im)
+    syncNode(im)
   }
   afterEdit()
 }
@@ -970,8 +1455,20 @@ const APP_EXTRA_ACTIONS: Action[] = [
   { id: 'app.settings', label: '설정', group: '앱', defaultCombo: 'Ctrl+,' },
   { id: 'share.webLink', label: '웹 뷰어 링크 공유', group: '앱', defaultCombo: 'Ctrl+Shift+S' },
 ]
+// 도구(텍스트·드로잉) 전환 + 댓글 — '도구' 그룹. 한 글자 단축키(기존 바인딩과 비충돌 확인).
+const TOOL_ACTIONS: Action[] = [
+  { id: 'tool.select', label: '선택 도구', group: '도구', defaultCombo: 'V' },
+  { id: 'tool.text', label: '텍스트 도구', group: '도구', defaultCombo: 'T' },
+  { id: 'tool.pen', label: '펜 도구', group: '도구', defaultCombo: 'P' },
+  { id: 'tool.line', label: '직선 도구', group: '도구', defaultCombo: 'L' },
+  { id: 'tool.rect', label: '사각형 도구', group: '도구', defaultCombo: 'R' },
+  { id: 'tool.ellipse', label: '타원 도구', group: '도구', defaultCombo: 'O' },
+  { id: 'tool.arrow', label: '화살표 도구', group: '도구', defaultCombo: 'A' },
+  { id: 'tool.eraser', label: '드로잉 지우개', group: '도구', defaultCombo: 'E' },
+  { id: 'comment.edit', label: '이미지 댓글', group: '도구', defaultCombo: 'Alt+C' },
+]
 // 단축키 액션 카탈로그 등록(저장된 사용자 재바인딩도 이때 함께 로드된다).
-registerActions([...DEFAULT_ACTIONS, ...WINDOW_ACTIONS, ...APP_EXTRA_ACTIONS])
+registerActions([...DEFAULT_ACTIONS, ...WINDOW_ACTIONS, ...APP_EXTRA_ACTIONS, ...TOOL_ACTIONS])
 
 // ---- 윈도우 모드 토글(데스크탑 전용 · PureRef 정체성) ----
 let winAlwaysOnTop = false
@@ -1089,7 +1586,10 @@ function runAction(id: string) {
     // 편집
     case 'edit.selectAll': sel.set(scene.allIds()); break
     case 'edit.escape':
-      if (cropMode) exitCropMode()
+      if (noteEditor) cancelNoteEditor() // 텍스트 편집 중 → 취소
+      else if (drawState) cancelDrawing() // 드로잉 드래그 중 → 취소
+      else if (cropMode) exitCropMode()
+      else if (activeTool !== 'select') setActiveTool('select') // 도구 사용 중 → 선택 도구로 복귀
       else {
         sel.clear()
         scene.drawRubber(null)
@@ -1121,6 +1621,17 @@ function runAction(id: string) {
     case 'transform.resetTransform': resetTransform(); break
     case 'transform.flipH': flipSelected('x'); break
     case 'transform.flipV': flipSelected('y'); break
+    // 도구(텍스트·드로잉) — 활성 도구 전환
+    case 'tool.select': setActiveTool('select'); break
+    case 'tool.text': setActiveTool('text'); break
+    case 'tool.pen': setActiveTool('pen'); break
+    case 'tool.line': setActiveTool('line'); break
+    case 'tool.rect': setActiveTool('rect'); break
+    case 'tool.ellipse': setActiveTool('ellipse'); break
+    case 'tool.arrow': setActiveTool('arrow'); break
+    case 'tool.eraser': setActiveTool('eraser'); break
+    // 댓글(선택 이미지에 메모)
+    case 'comment.edit': editComment(); break
     // 파일
     case 'file.import': openImageFiles(); break
     case 'file.save': void save(); break

@@ -2,7 +2,7 @@
 // 데스크탑 앱과 core(scene/board/theme)를 그대로 공유하되, 편집 입력을 배선하지 않아 읽기전용이 된다.
 // 입력은 touch.ts(attachTouchGestures)로 통일 — Pointer Events라 마우스/터치가 함께 처리된다(팬·핀치·탭).
 import { Scene } from '../core/scene'
-import { deserialize, type BoardState } from '../core/board'
+import { deserialize, isImageItem, type BoardItem, type BoardState } from '../core/board'
 import { applyTheme, getTheme } from '../core/theme'
 import { openLightbox } from './lightbox'
 import { renderBoardMeta } from './board-meta'
@@ -62,23 +62,34 @@ function fitAll(pad = 0.9): void {
 // 현재 보드(부트에서 채움). 라이트박스 hit 판정에 사용.
 let board: BoardState | null = null
 
-// 화면 좌표 아래의 최상단(z 큰) 이미지 id를 찾는다(라이트박스 진입용).
+// 화면 좌표 아래의 최상단(z 큰) "이미지" id를 찾는다(라이트박스 진입용).
+// 노트/드로잉은 라이트박스 대상이 아니므로 isImageItem으로 걸러 이미지만 적중시킨다.
 function hitTest(sx: number, sy: number): string | null {
+  return hitTestItem(sx, sy, (it) => isImageItem(it))?.id ?? null
+}
+
+// 화면 좌표 아래의 최상단(z 큰) 아이템을 조건(pred)에 맞는 것 중에서 찾는다.
+// 라이트박스(이미지)·댓글 호버(이미지+comment) 등 용도별로 pred만 바꿔 재사용한다.
+function hitTestItem(sx: number, sy: number, pred: (it: BoardItem) => boolean): BoardItem | null {
   if (!board) return null
   const w = scene.screenToWorld(sx, sy)
   const items = [...board.items].sort((a, b) => b.z - a.z) // z 내림차순(위에 있는 것 우선)
   for (const it of items) {
+    if (!pred(it)) continue
     const a = scene.getItemAABB(it.id)
-    if (a && w.x >= a.minX && w.x <= a.maxX && w.y >= a.minY && w.y <= a.maxY) return it.id
+    if (a && w.x >= a.minX && w.x <= a.maxX && w.y >= a.minY && w.y <= a.maxY) return it
   }
   return null
 }
 
-// 클릭/탭한 이미지를 라이트박스로 연다(z 오름차순 목록에서 해당 인덱스).
+// 클릭/탭한 이미지를 라이트박스로 연다(z 오름차순 "이미지" 목록에서 해당 인덱스).
+// 노트/드로잉은 src가 없어 라이트박스 항목이 될 수 없으므로 isImageItem으로 거른다
+// (걸러야 인덱스가 어긋나지 않고 undefined src가 섞이지 않는다).
 function openLightboxAt(id: string): void {
   if (!board) return
   // 라이트박스는 풀스크린이라 원본(srcs.orig)을 띄운다 — 없으면 src 폴백(편집·하위호환).
   const list = [...board.items]
+    .filter(isImageItem)
     .sort((a, b) => a.z - b.z)
     .map((it) => ({ id: it.id, src: it.srcs?.orig ?? it.src }))
   const idx = list.findIndex((x) => x.id === id)
@@ -95,7 +106,7 @@ function buildA11yImageList(b: BoardState): HTMLElement {
   nav.style.cssText =
     'position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;' +
     'clip:rect(0 0 0 0);white-space:nowrap;border:0'
-  const ordered = [...b.items].filter((i) => i.type === 'image').sort((a, c) => a.z - c.z)
+  const ordered = [...b.items].filter(isImageItem).sort((a, c) => a.z - c.z)
   ordered.forEach((it, i) => {
     const btn = document.createElement('button')
     btn.type = 'button'
@@ -146,6 +157,69 @@ attachTouchGestures(host, {
 host.addEventListener('contextmenu', (e) => e.preventDefault())
 window.addEventListener('resize', () => fitAll())
 
+// ---- 댓글(comment) 읽기전용 표시 ----
+// 보드는 PixiJS 캔버스 한 장이라 이미지에 부착된 메모(BoardImage.comment)를 표시할 DOM이 없다.
+// 그래서 커서가 댓글이 있는 이미지 위에 올라가면 가벼운 플로팅 툴팁으로 메모를 보여준다(읽기전용).
+// 노트/드로잉에는 comment 필드가 없으므로(스키마상 이미지 전용) 이미지만 대상으로 한다.
+const commentTip = document.createElement('div')
+commentTip.setAttribute('role', 'tooltip')
+commentTip.style.cssText = [
+  'position:fixed',
+  'z-index:60', // 메타(50)보다 위, 라이트박스(10001)보다 아래
+  'max-width:280px',
+  'padding:8px 12px',
+  'border-radius:8px',
+  'font:13px/1.45 system-ui,Segoe UI,sans-serif',
+  'white-space:pre-wrap', // 줄바꿈 보존
+  'word-break:break-word',
+  'pointer-events:none', // 입력(팬/탭)을 가로채지 않게
+  'background:var(--rb-panel-bg, rgba(40,40,40,.92))',
+  'color:var(--rb-text, #e6e6e6)',
+  'border:1px solid var(--rb-panel-border, #3a3a3a)',
+  'box-shadow:0 6px 24px rgba(0,0,0,.4)',
+  '-webkit-backdrop-filter:blur(6px)',
+  'backdrop-filter:blur(6px)',
+  'display:none', // 기본 숨김
+].join(';')
+document.body.appendChild(commentTip)
+
+// 화면 좌표에 위치한 "댓글 있는 이미지"의 comment를 반환(없으면 null).
+function commentAt(sx: number, sy: number): string | null {
+  const it = hitTestItem(sx, sy, (i) => isImageItem(i) && !!i.comment && i.comment.trim().length > 0)
+  return it && isImageItem(it) ? (it.comment ?? null) : null
+}
+
+// 댓글 툴팁을 커서 근처에 표시한다(화면 밖으로 넘치지 않게 가장자리에서 반대편으로 뒤집음).
+function showCommentTip(text: string, clientX: number, clientY: number): void {
+  commentTip.textContent = text
+  commentTip.style.display = 'block'
+  const margin = 14
+  // 먼저 보이게 한 뒤 크기를 측정해 위치를 보정한다.
+  const w = commentTip.offsetWidth
+  const h = commentTip.offsetHeight
+  let left = clientX + margin
+  let top = clientY + margin
+  if (left + w > window.innerWidth - 8) left = clientX - margin - w // 오른쪽 넘침 → 왼쪽
+  if (top + h > window.innerHeight - 8) top = clientY - margin - h // 아래 넘침 → 위
+  commentTip.style.left = Math.max(8, left) + 'px'
+  commentTip.style.top = Math.max(8, top) + 'px'
+}
+
+function hideCommentTip(): void {
+  if (commentTip.style.display !== 'none') commentTip.style.display = 'none'
+}
+
+// 마우스 이동 시에만 갱신(터치는 탭→라이트박스라 호버 개념이 약해 생략).
+host.addEventListener('mousemove', (e) => {
+  const rect = host.getBoundingClientRect()
+  const text = commentAt(e.clientX - rect.left, e.clientY - rect.top)
+  if (text) showCommentTip(text, e.clientX, e.clientY)
+  else hideCommentTip()
+})
+// 캔버스를 벗어나거나 카메라가 움직이면(휠/팬) 위치가 어긋나므로 숨긴다.
+host.addEventListener('mouseleave', hideCommentTip)
+host.addEventListener('wheel', hideCommentTip, { passive: true })
+
 // 보드를 화면에 렌더(임베드/해시 공통 경로).
 async function renderBoard(b: BoardState): Promise<void> {
   board = b
@@ -154,7 +228,7 @@ async function renderBoard(b: BoardState): Promise<void> {
   // 보드 메타(제목/이미지 수) 좌상단.
   const meta = renderBoardMeta({
     title: b.board.title || 'RefBoard',
-    count: b.items.filter((i) => i.type === 'image').length,
+    count: b.items.filter(isImageItem).length,
   })
   meta.style.position = 'fixed'
   meta.style.top = '16px'

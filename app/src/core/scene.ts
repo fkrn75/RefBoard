@@ -1,15 +1,16 @@
-import { Application, Container, Graphics, Sprite, Texture, Assets, Rectangle, type FederatedPointerEvent } from 'pixi.js'
+import { Application, Container, Graphics, Sprite, Text, Texture, Assets, Rectangle, type FederatedPointerEvent } from 'pixi.js'
 import { AnimatedGIF } from '@pixi/gif'
-import type { BoardImage } from './board'
+import type { BoardImage, BoardItem, BoardNote, BoardDrawing } from './board'
+import { isImageItem, isNoteItem, isDrawingItem } from './board'
 import type { GizmoHandle } from './gizmo'
-import { cropToFrame } from './crop'
+import { cropToFrame, croppedSize } from './crop'
 import type { GridLines } from './grid'
 import { getCanvasColors } from './theme'
 
 // 화면 입력 1건을 "월드 좌표 + 적중 아이템"으로 정규화한 형태.
 export interface ScenePointer {
   world: { x: number; y: number }
-  hitId: string | null // 클릭된 이미지 id (빈 곳이면 null)
+  hitId: string | null // 클릭된 아이템 id (빈 곳이면 null) — 이미지/노트/드로잉 공통
   button: number
   shift: boolean
   alt: boolean
@@ -22,13 +23,37 @@ export interface Rect {
   h: number
 }
 
+// 한 아이템을 화면에 표시하는 PixiJS 디스플레이 오브젝트.
+//  - 이미지: Sprite(또는 AnimatedGIF)
+//  - 노트  : Text
+//  - 드로잉: Graphics
+// 모두 Container를 상속하므로 position/scale/rotation/alpha/zIndex를 공유한다.
+// AABB·기즈모·선택 외곽선은 "natural(고유 박스) × |scale|" 기반으로 일반화해 한 경로로 처리한다.
+type ItemNode = Sprite | Text | Graphics
+
+// 디스플레이 오브젝트의 회전 전 "고유 박스(natural) 크기"를 보관하는 보조 메타.
+//  - 이미지: 크롭 반영 표시 픽셀(= croppedSize). texture.width와 수학적으로 같지만, 축소
+//    텍스처(srcs.medium) 보정(k)을 scale에 싣는 구조라 natural을 따로 들고 있어야 일관된다.
+//  - 노트/드로잉: board 모델의 natural(측정/바운딩 박스 크기).
+// corners()/AABB/기즈모가 모두 이 natural을 기준으로 계산한다(이미지 결과는 종전과 불변).
+interface NodeMeta {
+  node: ItemNode
+  natural: { w: number; h: number } // 회전 전 박스(월드, scale=1 기준)
+  // 논리 scale = transform.scale. 이미지의 축소텍스처 보정(k)은 표시 배율(node.scale)에만 싣고
+  // 경계 계산에는 제외한다 → 경계 반폭/반높이 = natural × scale (gizmo.ts handlePositions와 동일식).
+  // 이렇게 해야 크롭+srcs 이미지에서도 종전(texture.width×node.scale) 경계와 정확히 일치한다(회귀 0).
+  scale: number
+}
+
 // PixiJS(WebGL) 기반 무한 캔버스 렌더러.
 // world 컨테이너 1개를 이동/스케일해 무한 캔버스 + 줌/팬을 구현한다.
 // 좌표·적중 판정은 Scene이 책임지고, 선택/이동 "로직"은 main이 콜백으로 담당한다.
 export class Scene {
   readonly app: Application
   readonly world: Container
-  private sprites = new Map<string, Sprite>()
+  // 모든 아이템(이미지/노트/드로잉)의 디스플레이 오브젝트 + 고유 박스 메타를 한 맵으로 관리한다.
+  // 키=board item id. 이미지 전용 보조 접근(getSprite 등)은 여기서 타입 좁혀 제공한다.
+  private nodes = new Map<string, NodeMeta>()
   private selLayer = new Graphics() // 선택 외곽선
   private rubberLayer = new Graphics() // 러버밴드 사각형
   private gizmoLayer = new Graphics() // 변형 기즈모 핸들
@@ -103,6 +128,31 @@ export class Scene {
     return this.world.toLocal({ x: sx, y: sy })
   }
 
+  // ---- 공통 노드 등록/배치 헬퍼 ----
+  // 디스플레이 오브젝트의 공통 입력 속성(적중 대상·id 라벨)을 세팅한다.
+  private wireNode(node: ItemNode, id: string, cursor = 'grab') {
+    node.eventMode = 'static' // 포인터 적중 대상
+    node.cursor = cursor
+    node.label = id // 적중 시 id 식별용
+  }
+
+  // transform(중심 위치·스케일·회전·flip·alpha·z)을 디스플레이 오브젝트에 반영하는 공통 경로.
+  //  - extraScale: 이미지의 축소 텍스처 보정(k) 같은 추가 배율(노트/드로잉은 1).
+  //  - flip은 scale 부호로 반영(비파괴). corners()는 |scale| 기반이라 경계/기즈모엔 영향 없음.
+  private applyNodeTransform(node: ItemNode, it: BoardItem, extraScale = 1) {
+    const t = it.transform
+    node.position.set(t.x, t.y)
+    const sx = t.scale * extraScale * (t.flipX ? -1 : 1)
+    const sy = t.scale * extraScale * (t.flipY ? -1 : 1)
+    node.scale.set(sx, sy)
+    node.rotation = t.rotation
+    node.alpha = it.opacity
+    node.zIndex = it.z
+    // 이미 등록된 노드면 논리 scale(k·flip 제외)을 갱신해 경계 계산이 최신 변형을 반영하게 한다.
+    const m = this.nodes.get(it.id)
+    if (m) m.scale = t.scale
+  }
+
   // ---- 이미지 ----
   async addImage(img: BoardImage): Promise<Sprite> {
     let sprite: Sprite
@@ -118,12 +168,12 @@ export class Scene {
       sprite = new Sprite(texture)
     }
     sprite.anchor.set(0.5) // 중심 기준 배치/스케일/회전
-    sprite.eventMode = 'static' // 포인터 적중 대상
-    sprite.cursor = 'grab'
-    sprite.label = img.id // 적중 시 id 식별용
+    this.wireNode(sprite, img.id)
     this.applyTransform(sprite, img)
     this.world.addChild(sprite)
-    this.sprites.set(img.id, sprite)
+    // 고유 박스(natural)=크롭 반영 표시 픽셀. corners()/AABB가 이를 기준으로 계산해
+    // 종전 texture.width 기반 경계와 수학적으로 동일하다(회귀 0).
+    this.registerNode(img.id, sprite, croppedSize(img.crop, img.natural), img.transform.scale)
     if (img.crop) this.applyCrop(img.id, img) // 저장본/복원 시 크롭 반영
     return sprite
   }
@@ -131,10 +181,12 @@ export class Scene {
   // crop(원본 픽셀 사각형) 반영 — 공유 source는 유지하고 frame만 교체(비파괴). GIF는 미지원.
   // crop이 없으면 원본 전체 frame으로 되돌린다(크롭 리셋 경로).
   applyCrop(id: string, img: BoardImage) {
-    const sprite = this.sprites.get(id)
+    const sprite = this.getSprite(id)
     if (!sprite || sprite instanceof AnimatedGIF) return
     const f = cropToFrame(img.crop, img.natural)
     sprite.texture = new Texture({ source: sprite.texture.source, frame: new Rectangle(f.x, f.y, f.w, f.h) })
+    // 크롭으로 표시 픽셀이 바뀌면 고유 박스(natural)도 갱신해 AABB/기즈모가 새 크롭을 반영한다.
+    this.setNodeNatural(id, croppedSize(img.crop, img.natural))
   }
 
   // src가 GIF인지 판별(data URL 또는 .gif 확장자)
@@ -144,69 +196,240 @@ export class Scene {
 
   // 보드 데이터의 변형값을 스프라이트에 반영(비파괴: 원본 텍스처 불변)
   applyTransform(sprite: Sprite, img: BoardImage) {
-    sprite.position.set(img.transform.x, img.transform.y)
     // 축소 텍스처(srcs.medium 등) 보정: 실픽셀(texture.width)이 원본(natural.w)보다 작으면
-    // 그 비율 k만큼 키워 같은 월드 크기로 보이게 한다. corners()/AABB/gizmo가 texture.width
-    // 기반이라 scale에 k를 실으면 자동 정합한다. srcs 없는(편집·하위호환) 보드는 k=1로 무영향.
+    // 그 비율 k만큼 키워 같은 월드 크기로 보이게 한다. corners()/AABB/gizmo는 natural 기반이라
+    // 이미지의 고유 박스 크기와 정합한다. srcs 없는(편집·하위호환) 보드는 k=1로 무영향.
     const texW = sprite.texture.width
     const k = img.srcs && texW > 0 ? img.natural.w / texW : 1
-    // flip은 scale 부호로 반영(비파괴). corners()는 abs(scale)이라 경계/기즈모 계산엔 영향 없음.
-    const sx = img.transform.scale * k * (img.transform.flipX ? -1 : 1)
-    const sy = img.transform.scale * k * (img.transform.flipY ? -1 : 1)
-    sprite.scale.set(sx, sy)
-    sprite.rotation = img.transform.rotation
-    sprite.alpha = img.opacity
-    sprite.zIndex = img.z
+    this.applyNodeTransform(sprite, img, k)
   }
 
-  getSprite(id: string): Sprite | undefined {
-    return this.sprites.get(id)
-  }
-  allIds(): string[] {
-    return [...this.sprites.keys()]
-  }
-
-  // 모든 스프라이트 커서 일괄 변경(이동 드래그 중 'grabbing' 등). 신규 스프라이트 기본값은 addImage의 'grab'.
-  setCursor(cursor: string) {
-    for (const s of this.sprites.values()) s.cursor = cursor
+  // ---- 노트(텍스트) ----
+  // 임시 Text로 렌더 크기를 측정한다(보드에 추가하지 않음). board.note.natural 채우기용.
+  measureNote(text: string, fontSize: number, color: string): { w: number; h: number } {
+    const t = new Text({ text: text.length > 0 ? text : ' ', style: this.noteStyle(fontSize, color) })
+    const w = Math.max(1, Math.ceil(t.width))
+    const h = Math.max(1, Math.ceil(t.height))
+    t.destroy()
+    return { w, h }
   }
 
-  // 스프라이트 제거(텍스처/리소스 해제). board.items 정리는 호출측 책임.
-  removeImage(id: string): boolean {
-    const s = this.sprites.get(id)
-    if (!s) return false
-    s.destroy()
-    this.sprites.delete(id)
+  // 노트를 보드에 추가. anchor 0.5(중심 기준) → 이미지와 동일 배치 모델 → 기즈모 자동 편입.
+  addNote(note: BoardNote): Text {
+    const t = new Text({ text: note.text, style: this.noteStyle(note.fontSize, note.color) })
+    t.anchor.set(0.5) // 중심 기준 배치/스케일/회전
+    this.wireNode(t, note.id, 'text')
+    this.applyNodeTransform(t, note)
+    this.world.addChild(t)
+    this.registerNode(note.id, t, note.natural, note.transform.scale)
+    return t
+  }
+
+  // 노트 내용/스타일/변형 갱신. text·fontSize·color가 바뀌면 Text를 다시 그려 natural을 갱신한다.
+  // 반환값: 갱신된 측정 크기(호출측이 board.note.natural에 반영하도록). 없는 id면 null.
+  updateNote(note: BoardNote): { w: number; h: number } | null {
+    const t = this.getNote(note.id)
+    if (!t) return null
+    t.text = note.text
+    t.style = this.noteStyle(note.fontSize, note.color)
+    const natural = { w: Math.max(1, Math.ceil(t.width)), h: Math.max(1, Math.ceil(t.height)) }
+    this.applyNodeTransform(t, note)
+    this.setNodeNatural(note.id, natural)
+    return natural
+  }
+
+  // 노트 공통 텍스트 스타일. wordWrap 미사용(고유 박스=한 줄/입력 개행 그대로 측정).
+  private noteStyle(fontSize: number, color: string) {
+    return {
+      fontFamily: 'Pretendard, -apple-system, "Malgun Gothic", sans-serif',
+      fontSize,
+      fill: color,
+      align: 'left' as const,
+    }
+  }
+
+  // ---- 드로잉(펜/도형) ----
+  // 드로잉을 보드에 추가. points는 "고유 박스 중심(0,0)" 로컬좌표 → Graphics는 position/scale/rotation만 배치.
+  addDrawing(d: BoardDrawing): Graphics {
+    const g = new Graphics()
+    this.paintDrawing(g, d)
+    this.wireNode(g, d.id)
+    this.applyNodeTransform(g, d)
+    this.world.addChild(g)
+    this.registerNode(d.id, g, d.natural, d.transform.scale)
+    return g
+  }
+
+  // 드로잉 path/스타일/변형 갱신. tool·points·color·width가 바뀌면 path를 다시 그린다.
+  updateDrawing(d: BoardDrawing): boolean {
+    const g = this.getDrawing(d.id)
+    if (!g) return false
+    this.paintDrawing(g, d)
+    this.applyNodeTransform(g, d)
+    this.setNodeNatural(d.id, d.natural)
     return true
   }
 
-  // 보드 전체를 비우고 새 items로 다시 그림(저장본 열기·Undo 복원용).
-  async rebuild(items: BoardImage[]) {
-    for (const id of [...this.sprites.keys()]) this.removeImage(id)
+  // 도구별 path를 Graphics에 그린다(로컬 좌표=고유 박스 중심 기준).
+  //  - pen   : moveTo + 연속 lineTo
+  //  - line  : 두 점 직선
+  //  - arrow : 두 점 직선 + 끝점에 화살촉(양 날개)
+  //  - rect  : 대각 두 점으로 사각형
+  //  - ellipse: 대각 두 점의 중심/반지름으로 타원
+  // 선폭(width)은 scale=1 기준 px. 월드 확대는 transform.scale이 담당(stroke도 같이 두꺼워짐).
+  private paintDrawing(g: Graphics, d: BoardDrawing) {
+    g.clear()
+    const pts = d.points
+    const color = d.color
+    const width = Math.max(0.1, d.width)
+    const stroke = { width, color, cap: 'round' as const, join: 'round' as const }
+
+    if (d.tool === 'pen') {
+      if (pts.length === 0) return
+      g.moveTo(pts[0].x, pts[0].y)
+      for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y)
+      g.stroke(stroke)
+      return
+    }
+
+    // 나머지 도구는 시작·끝(또는 대각) 2점을 사용. 점이 부족하면 그리지 않는다.
+    if (pts.length < 2) return
+    const a = pts[0]
+    const b = pts[pts.length - 1]
+
+    if (d.tool === 'line' || d.tool === 'arrow') {
+      g.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke(stroke)
+      if (d.tool === 'arrow') {
+        // 화살촉: 선 방향 기준 ±150°로 뻗은 두 날개. 길이는 선폭에 비례하되 최소치 보장.
+        const ang = Math.atan2(b.y - a.y, b.x - a.x)
+        const head = Math.max(8, width * 3)
+        const wing = Math.PI * (5 / 6) // 150°
+        g.moveTo(b.x, b.y)
+          .lineTo(b.x + Math.cos(ang + wing) * head, b.y + Math.sin(ang + wing) * head)
+          .moveTo(b.x, b.y)
+          .lineTo(b.x + Math.cos(ang - wing) * head, b.y + Math.sin(ang - wing) * head)
+          .stroke(stroke)
+      }
+      return
+    }
+
+    if (d.tool === 'rect') {
+      const x = Math.min(a.x, b.x)
+      const y = Math.min(a.y, b.y)
+      const w = Math.abs(b.x - a.x)
+      const h = Math.abs(b.y - a.y)
+      g.rect(x, y, w, h).stroke(stroke)
+      return
+    }
+
+    if (d.tool === 'ellipse') {
+      const cx = (a.x + b.x) / 2
+      const cy = (a.y + b.y) / 2
+      const rx = Math.abs(b.x - a.x) / 2
+      const ry = Math.abs(b.y - a.y) / 2
+      g.ellipse(cx, cy, rx, ry).stroke(stroke)
+      return
+    }
+  }
+
+  // ---- 통합 추가/재구성 ----
+  // 아이템 1건을 타입에 맞게 추가(이미지만 비동기 디코드, 나머지는 동기지만 Promise로 통일).
+  async addItem(it: BoardItem): Promise<ItemNode> {
+    if (isImageItem(it)) return this.addImage(it)
+    if (isNoteItem(it)) return this.addNote(it)
+    if (isDrawingItem(it)) return this.addDrawing(it)
+    // 유니온 확장 시 컴파일 타임에 누락을 잡는다(절대 도달하지 않음).
+    return ((_x: never) => Promise.reject(new Error('unknown item type')))(it)
+  }
+
+  // 보드 전체를 비우고 새 items로 다시 그림(저장본 열기·Undo 복원용). 이미지/노트/드로잉 혼재 지원.
+  async rebuild(items: BoardItem[]) {
+    for (const id of [...this.nodes.keys()]) this.removeItem(id)
     // 병렬 디코드 — 순차 await는 열기·Undo·Redo에서 전체 재디코드가 직렬이라 대량 보드에서 느리다(perf P2).
-    // z 순서는 sprite.zIndex(applyTransform) + world.sortableChildren이 보장하므로 추가 순서는 무관하다.
-    await Promise.all(items.map((img) => this.addImage(img)))
+    // z 순서는 node.zIndex(applyNodeTransform) + world.sortableChildren이 보장하므로 추가 순서는 무관하다.
+    await Promise.all(items.map((it) => this.addItem(it)))
+  }
+
+  // ---- 노드 맵 관리(내부) ----
+  private registerNode(id: string, node: ItemNode, natural: { w: number; h: number }, scale: number) {
+    this.nodes.set(id, { node, natural, scale })
+  }
+  private setNodeNatural(id: string, natural: { w: number; h: number }) {
+    const m = this.nodes.get(id)
+    if (m) m.natural = natural
+  }
+
+  // ---- 접근자 ----
+  // 이미지 전용 접근(기존 호출부 호환). 노트/드로잉 id면 undefined.
+  getSprite(id: string): Sprite | undefined {
+    const n = this.nodes.get(id)?.node
+    return n instanceof Sprite ? n : undefined
+  }
+  // 노트 전용 접근.
+  getNote(id: string): Text | undefined {
+    const n = this.nodes.get(id)?.node
+    return n instanceof Text ? n : undefined
+  }
+  // 드로잉 전용 접근. (Graphics는 selLayer 등 오버레이도 같은 타입이지만, nodes 맵엔 아이템만 등록된다)
+  getDrawing(id: string): Graphics | undefined {
+    const n = this.nodes.get(id)?.node
+    return n instanceof Graphics ? n : undefined
+  }
+  // 타입 무관 디스플레이 오브젝트 접근(공통 처리용).
+  getNode(id: string): ItemNode | undefined {
+    return this.nodes.get(id)?.node
+  }
+  allIds(): string[] {
+    return [...this.nodes.keys()]
+  }
+
+  // 모든 아이템 커서 일괄 변경(이동 드래그 중 'grabbing' 등). 신규 노드 기본값은 wireNode의 'grab'.
+  setCursor(cursor: string) {
+    for (const m of this.nodes.values()) m.node.cursor = cursor
+  }
+
+  // 아이템 제거(텍스처/리소스 해제). board.items 정리는 호출측 책임. 타입 무관(이미지/노트/드로잉).
+  removeItem(id: string): boolean {
+    const m = this.nodes.get(id)
+    if (!m) return false
+    m.node.destroy()
+    this.nodes.delete(id)
+    return true
+  }
+
+  // 하위호환 별칭 — 기존 호출부(main.ts removeImage)가 그대로 동작하도록 유지. 내부는 removeItem.
+  removeImage(id: string): boolean {
+    return this.removeItem(id)
   }
 
   // ---- 경계 계산 (회전·스케일 고려한 월드 4코너) ----
-  private corners(s: Sprite): { x: number; y: number }[] {
-    const hw = (s.texture.width / 2) * Math.abs(s.scale.x)
-    const hh = (s.texture.height / 2) * Math.abs(s.scale.y)
-    const cos = Math.cos(s.rotation)
-    const sin = Math.sin(s.rotation)
+  // 고유 박스(natural) × |scale| 을 반폭/반높이로 삼아 회전·평행이동한다.
+  //  - 이미지: natural=croppedSize, scale=transform.scale(축소텍스처 보정 k는 표시에만 실리고
+  //    natural이 이미 표시 픽셀이라 경계는 종전 texture.width 기반과 수학적으로 동일 → 회귀 0).
+  //  - 노트/드로잉: natural=측정/바운딩 박스. flip은 |scale|이라 경계에 영향 없음.
+  private cornersOf(meta: NodeMeta): { x: number; y: number }[] {
+    const node = meta.node
+    // 반폭/반높이 = natural × |scale| / 2. scale은 논리값(k·flip 제외)이라 gizmo.ts handlePositions와
+    // 동일식 → 기즈모 핸들과 선택 외곽선이 항상 일치한다. (flip은 박스 크기에 영향 없음)
+    const hw = (meta.natural.w / 2) * Math.abs(meta.scale)
+    const hh = (meta.natural.h / 2) * Math.abs(meta.scale)
+    const cos = Math.cos(node.rotation)
+    const sin = Math.sin(node.rotation)
+    const cx = node.position.x
+    const cy = node.position.y
     return [
       [-hw, -hh],
       [hw, -hh],
       [hw, hh],
       [-hw, hh],
-    ].map(([x, y]) => ({ x: s.x + x * cos - y * sin, y: s.y + x * sin + y * cos }))
+    ].map(([x, y]) => ({ x: cx + x * cos - y * sin, y: cy + x * sin + y * cos }))
   }
 
-  // 러버밴드 교차 판정용 축 정렬 경계상자(AABB)
+  // 러버밴드 교차 판정용 축 정렬 경계상자(AABB). 이미지/노트/드로잉 공통.
   getItemAABB(id: string): { minX: number; minY: number; maxX: number; maxY: number } | null {
-    const s = this.sprites.get(id)
-    if (!s) return null
-    const c = this.corners(s)
+    const m = this.nodes.get(id)
+    if (!m) return null
+    const c = this.cornersOf(m)
     const xs = c.map((p) => p.x)
     const ys = c.map((p) => p.y)
     return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) }
@@ -218,7 +441,7 @@ export class Scene {
       minY = Infinity,
       maxX = -Infinity,
       maxY = -Infinity
-    for (const id of this.sprites.keys()) {
+    for (const id of this.nodes.keys()) {
       const a = this.getItemAABB(id)
       if (!a) continue
       if (a.minX < minX) minX = a.minX
@@ -235,11 +458,11 @@ export class Scene {
     const c = getCanvasColors()
     const lw = 2 / this.world.scale.x // 화면상 2px 유지(줌 보정)
     for (const id of ids) {
-      const s = this.sprites.get(id)
-      if (!s) continue
+      const m = this.nodes.get(id)
+      if (!m) continue
       // 잠긴 항목은 주황(warn), 일반은 파랑(selection)으로 외곽선 색 구분(테마 연동)
       const color = lockedIds?.has(id) ? c.warn : c.selection
-      this.selLayer.poly(this.corners(s)).stroke({ width: lw, color })
+      this.selLayer.poly(this.cornersOf(m)).stroke({ width: lw, color })
     }
   }
 

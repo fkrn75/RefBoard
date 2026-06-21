@@ -10,7 +10,7 @@
 //
 // 하위호환: 구버전 .refb(평문 JSON)도 unpackRefb가 자동 감지해 읽는다(첫 바이트 '{'면 평문, 'PK'면 ZIP).
 
-import { serialize, deserialize, type BoardState, type BoardItem } from './board'
+import { serialize, deserialize, isImageItem, type BoardState } from './board'
 import { zipSync, unzipSync, strToU8, strFromU8, type Zippable } from 'fflate'
 
 // 컨테이너 버전 식별자. 미래에 구조가 바뀌면 숫자를 올린다(unpack은 상위 버전도 경고 후 읽기 시도).
@@ -123,10 +123,9 @@ function extOf(path: string): string {
   return dot >= 0 ? path.slice(dot + 1) : ''
 }
 
-// 아이템이 이미지(src를 가진) 타입인지 좁히기. 추후 note/group 타입이 늘어도 안전.
-function isImageItem(item: BoardItem): item is Extract<BoardItem, { type: 'image' }> {
-  return item.type === 'image'
-}
+// 아이템이 이미지(src를 가진) 타입인지 좁히기는 board.ts의 isImageItem(SSOT)을 사용한다.
+// 노트(BoardNote)·드로잉(BoardDrawing)은 자산(바이너리 src)이 없으므로 이 가드로 걸러져
+// board.json에 그대로 보존된다(자산화 루프를 건너뜀 → 직렬화 왕복에서 데이터 무손실).
 
 // ── pack ───────────────────────────────────────────────────────────────────
 /**
