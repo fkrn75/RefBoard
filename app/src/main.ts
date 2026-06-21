@@ -3,6 +3,8 @@ import {
   createEmptyBoard,
   genId,
   isImageItem,
+  isNoteItem,
+  isDrawingItem,
   type BoardImage,
   type BoardItem,
   type BoardNote,
@@ -24,6 +26,7 @@ import { cropRectFromDrag, croppedSize } from './core/crop'
 import { expandByGroup, planGroup, planUngroup } from './core/group'
 import { visibleGrid } from './core/grid'
 import { OpacityControl } from './core/opacity-control'
+import { StyleControl, type StyleValues } from './core/style-control'
 import { packRefb } from './core/refb'
 import { exportSceneAll, exportSelection, renderThumbnail, downloadBlob } from './core/export-image'
 import { AutoSave } from './core/autosave'
@@ -72,11 +75,12 @@ const toolbar = createToolbar({ onAction: (id) => runAction(id), isDesktop: isDe
 // 자기 동작(텍스트 배치 · 드로잉 드래그 · 지우개)으로 가로챈다(scene.onPointer* 진입부에서 분기).
 type ActiveTool = 'select' | 'text' | 'pen' | 'line' | 'rect' | 'ellipse' | 'arrow' | 'eraser'
 let activeTool: ActiveTool = 'select'
-// 드로잉 기본 스타일(scale=1 기준). 이후 우클릭 팔레트 등으로 노출 가능(현재는 고정값).
-const DRAW_COLOR = '#ff5a5a'
-const DRAW_WIDTH = 4
-const TEXT_COLOR = '#ffffff'
-const TEXT_FONT_SIZE = 28
+// 드로잉/텍스트 "현재 그리기" 기본 스타일(scale=1 기준). StyleControl로 실시간 변경한다.
+// 선택 아이템이 없을 때(도구 모드)의 변경은 "다음 생성" 기본값을 바꾸고, 선택이 있으면 그 아이템을 바꾼다.
+let DRAW_COLOR = '#ff5a5a'
+let DRAW_WIDTH = 4
+let TEXT_COLOR = '#ffffff'
+let TEXT_FONT_SIZE = 28
 
 // 도구 버튼 활성 표시를 현재 activeTool에 맞춰 토글한다(선택 도구 포함, 한 번에 하나만 강조).
 const TOOL_ACTION_IDS: Record<ActiveTool, string> = {
@@ -102,6 +106,7 @@ function setActiveTool(tool: ActiveTool) {
   host.style.cursor = tool === 'select' ? '' : tool === 'eraser' ? 'cell' : 'crosshair'
   scene.setCursor(tool === 'select' ? 'grab' : 'crosshair')
   showToast(TOOL_HINT[tool], true)
+  refreshStyleControl() // 도구 전환 시 스타일 패널 갱신(드로잉=색+굵기 / 텍스트=색+크기)
 }
 const TOOL_HINT: Record<ActiveTool, string> = {
   select: '선택 도구',
@@ -192,6 +197,7 @@ sel.onChange(() => {
   scene.drawSelection(sel.values(), lockedIdSet())
   refreshGizmo()
   syncOpacityControl()
+  refreshStyleControl()
   toolbar.updateStatus({ selCount: sel.values().length, total: board.items.filter(isImageItem).length })
 })
 
@@ -299,6 +305,114 @@ function syncOpacityControl() {
   }
   const im = board.items.find((i) => i.id === ids[0])
   opacityCtl.show(im ? im.opacity : 1)
+}
+
+// ---- 스타일 컨트롤(색·굵기·글자크기) ----
+const styleCtl = new StyleControl(host)
+let styleCommitted = false // 색/슬라이더 조작 중 1회만 commit(undo 1스텝)
+
+// 스타일 변경 대상: 선택된 노트/드로잉(잠금 제외). 이미지는 색/굵기 개념이 없어 제외한다.
+function styleTargets(): (BoardNote | BoardDrawing)[] {
+  const out: (BoardNote | BoardDrawing)[] = []
+  for (const id of sel.values()) {
+    const it = board.items.find((i) => i.id === id)
+    if (it && !it.locked && (isNoteItem(it) || isDrawingItem(it))) out.push(it)
+  }
+  return out
+}
+
+// 선택/도구 상태에 맞춰 스타일 패널 표시를 갱신한다.
+//  - 노트/드로잉 선택 → 그 값(색 + 굵기/크기) 표시(대표=첫 항목)
+//  - 선택 없음 + 드로잉/텍스트 도구 → "다음 생성" 기본값 표시
+//  - 그 외(이미지 선택·select 도구·빈 선택) → 숨김
+function refreshStyleControl() {
+  const ts = styleTargets()
+  if (ts.length > 0) {
+    const v: StyleValues = { color: ts[0].color }
+    const draw = ts.find(isDrawingItem)
+    const note = ts.find(isNoteItem)
+    if (draw) v.width = draw.width
+    if (note) v.fontSize = note.fontSize
+    styleCtl.show(v)
+    return
+  }
+  if (activeTool === 'pen' || activeTool === 'line' || activeTool === 'rect' || activeTool === 'ellipse' || activeTool === 'arrow') {
+    styleCtl.show({ color: DRAW_COLOR, width: DRAW_WIDTH })
+  } else if (activeTool === 'text') {
+    styleCtl.show({ color: TEXT_COLOR, fontSize: TEXT_FONT_SIZE })
+  } else {
+    styleCtl.hide()
+  }
+}
+
+// 색: 선택 아이템이 있으면 그 아이템 색을, 없으면 "다음 생성" 기본값을 바꾼다.
+styleCtl.onColorInput = (hex) => {
+  const ts = styleTargets()
+  if (ts.length > 0) {
+    if (!styleCommitted) {
+      commit()
+      styleCommitted = true
+    }
+    for (const it of ts) {
+      it.color = hex
+      syncNode(it) // 노트=updateNote / 드로잉=updateDrawing로 재렌더(색 반영)
+    }
+  } else if (activeTool === 'text') {
+    TEXT_COLOR = hex
+  } else {
+    DRAW_COLOR = hex
+  }
+}
+styleCtl.onColorChange = (hex) => {
+  styleCtl.onColorInput?.(hex) // 값 반영(선택 아이템 또는 기본값) — input이 안 온 브라우저 대비
+  styleCommitted = false // 다음 조작을 위해 리셋
+  afterEdit()
+}
+
+// 굵기: 드로잉만 대상(텍스트엔 굵기 없음). 선택 없으면 기본값.
+styleCtl.onWidthInput = (w) => {
+  const ds = styleTargets().filter(isDrawingItem)
+  if (ds.length > 0) {
+    if (!styleCommitted) {
+      commit()
+      styleCommitted = true
+    }
+    for (const d of ds) {
+      d.width = w
+      scene.updateDrawing(d)
+    }
+  } else {
+    DRAW_WIDTH = w
+  }
+}
+styleCtl.onWidthChange = (w) => {
+  styleCtl.onWidthInput?.(w)
+  styleCommitted = false
+  afterEdit()
+}
+
+// 글자크기: 노트만 대상. 크기가 바뀌면 natural(측정 박스)이 변하므로 updateNote 반환값으로 갱신한다.
+styleCtl.onFontInput = (s) => {
+  const ns = styleTargets().filter(isNoteItem)
+  if (ns.length > 0) {
+    if (!styleCommitted) {
+      commit()
+      styleCommitted = true
+    }
+    for (const n of ns) {
+      n.fontSize = s
+      const m = scene.updateNote(n)
+      if (m) n.natural = m
+    }
+    afterEdit() // 박스 크기 변화 → 선택 외곽선/기즈모 갱신
+  } else {
+    TEXT_FONT_SIZE = s
+  }
+}
+styleCtl.onFontChange = (s) => {
+  styleCtl.onFontInput?.(s)
+  styleCommitted = false
+  afterEdit()
 }
 function updateMinimap() {
   // 미니맵이 숨김이면 contentBounds()의 O(n) 계산 자체를 생략(기본값이 숨김 — perf P1).
