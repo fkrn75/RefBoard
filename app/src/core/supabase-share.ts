@@ -164,7 +164,14 @@ export class SupabaseShareAdapter implements ShareAdapter {
       return { ok: false, reason: user ? 'forbidden' : 'auth-required' }
     }
     if (!data) {
-      // 0행 = 미존재 또는 RLS 거부(미허가/만료). 로그인 여부로 사유를 가른다.
+      // 0행 = 미존재 또는 RLS 거부(미허가/만료). boards_read RLS가 만료행까지 숨기므로
+      // (docs/share-backend-design.md §5: select 조건에 `expires_at > now()` 포함) 미존재·미허가·만료가
+      // 모두 0행으로 합쳐진다. RLS를 우회하는 SECURITY DEFINER RPC(board_block_reason)로 사유를 정확히
+      // 식별한다(§5.1). RPC가 아직 배포 안 됐거나 실패하면 null → 아래 안전 폴백(forbidden/auth-required).
+      const reason = await this.blockReason(id)
+      if (reason === 'expired') return { ok: false, reason: 'expired' } // 만료는 비소유자에겐 종단(로그인해도 불가)
+      if (reason === 'not_found') return { ok: false, reason: 'not-found' }
+      // 'forbidden' 또는 RPC 미가용: 미로그인은 로그인하면 허용목록 통과 가능성이 있으니 로그인 유도.
       const user = await this.getCurrentUser()
       return { ok: false, reason: user ? 'forbidden' : 'auth-required' }
     }
@@ -173,6 +180,20 @@ export class SupabaseShareAdapter implements ShareAdapter {
     const board = data.data as BoardState
     await this.signUrls(board) // Storage 키 → 서명 URL
     return { ok: true, board }
+  }
+
+  // 0행(load 실패)의 사유를 RLS 우회 RPC로 식별한다. boards_read RLS는 만료/미허가/미존재를
+  // 0행으로 합치므로 클라 select만으로는 못 가른다. board_block_reason은 SECURITY DEFINER라
+  // RLS를 타지 않고 'expired'|'forbidden'|'not_found'를 돌려준다(docs/share-backend-design.md §5.1).
+  // ⚠️ RPC가 미배포(구버전 백엔드)거나 오류면 null을 반환해 호출부가 안전 폴백하게 한다(점진 배포 안전).
+  private async blockReason(id: string): Promise<'expired' | 'forbidden' | 'not_found' | null> {
+    try {
+      const { data, error } = await this.sb().rpc('board_block_reason', { p_board_id: id })
+      if (error) return null
+      return data === 'expired' || data === 'forbidden' || data === 'not_found' ? data : null
+    } catch {
+      return null
+    }
   }
 
   // ---- 내부 헬퍼 ----

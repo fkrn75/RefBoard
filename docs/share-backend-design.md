@@ -117,6 +117,45 @@ create policy allowlist_owner on board_allowlist
 
 > 핵심: 뷰어는 anon key로 접속하지만, `select`는 RLS를 통과해야만 행을 받는다. id를 알아도 허용목록에 없으면 **0행 반환 = 접근 거부**. 허용목록 검증은 `is_allowed()` SECURITY DEFINER 함수로 단일화 — 미검증 email 클레임(매직링크 미확인 등)으로 우회하는 공격을 차단(`email_verified: true` + `aud: 'authenticated'` 동시 검증, P1#1).
 
+## 5.1 만료/미허가 구분 RPC — `board_block_reason` (UX)
+
+`boards_read`가 만료 행까지 select에서 숨기므로(위 정책의 `expires_at > now()`), 뷰어 입장에선 **미존재·미허가·만료가 전부 0행으로 합쳐져** 구분이 안 된다 → "만료된 공유 링크입니다" 화면(`viewer/main.ts`)이 영영 안 뜬다. RLS를 우회하는 SECURITY DEFINER 함수로 **사유 문자열만** 정확히 돌려준다.
+
+```sql
+-- 0행(load 실패)의 사유 식별: 'expired' | 'forbidden' | 'not_found'
+-- ⚠️ boards.id 는 text(고엔트로피 32hex, 4절) — uuid 가 아니다. 파라미터도 text 여야 매칭된다
+--    (uuid 로 만들면 캐스팅 시 대시 포함 형태가 되어 무대시 저장값과 어긋남).
+create or replace function public.board_block_reason(p_board_id text)
+returns text
+language plpgsql
+security definer
+set search_path = public, pg_temp
+stable
+as $$
+declare
+  v_expires timestamptz;
+begin
+  select expires_at into v_expires from boards where id = p_board_id;
+  if not found then
+    return 'not_found';                                   -- boards 에 행 자체가 없음
+  elsif v_expires is not null and v_expires <= now() then
+    return 'expired';                                     -- 존재하나 만료(RLS 가 숨긴 사유)
+  else
+    return 'forbidden';                                   -- 존재·미만료지만 비공개+미허가
+  end if;
+end;
+$$;
+
+-- 뷰어(anon)도 호출 가능해야 한다. 반환은 사유 문자열뿐(보드 내용 노출 없음).
+grant execute on function public.board_block_reason(text) to anon, authenticated;
+```
+
+> **보안 트레이드오프(허용 가능)**: 이 함수는 SECURITY DEFINER라 RLS를 우회해 *임의 id의 존재·만료 여부*를 anon 에게 알려준다. 단 board_id 가 128bit 고엔트로피(P1#2)라 enumerate 가 불가능하고, 노출 정보가 보드 내용이 아닌 사유 문자열(존재/만료)뿐이라 영향이 미미하다 — 정확한 만료 안내(UX) 이득이 더 크다.
+
+> **클라이언트 연동**: `SupabaseShareAdapter.load()`의 0행 분기가 `board_block_reason`을 호출 → `'expired'`→만료 화면, `'not_found'`→없음 화면, `'forbidden'`(또는 RPC 미배포)→로그인 여부로 권한/로그인 화면. **RPC 미배포 시 자동 폴백**(기존 동작 유지)이라 이 SQL 적용 전에도 앱은 안전히 동작하고, 적용하면 만료 화면이 켜진다(점진 배포 안전).
+
+> **적용(사용자 직접)**: Supabase 대시보드 → SQL Editor 에 위 SQL 실행(프로젝트 규칙: 백엔드 마이그레이션은 사용자 수행). 적용 후 만료된 공유 링크를 비로그인/비소유자로 열어 "만료된 공유 링크입니다." 표시 확인. 소유자는 `boards_owner_all` 로 만료여도 행을 받아 정상 열람되므로 만료 화면이 뜨지 않는다(정상).
+
 ## 6. Storage 구조 + 다중해상도 연계
 
 비공개 버킷 `boards`. 경로 규약:
