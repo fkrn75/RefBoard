@@ -206,8 +206,8 @@ export class Scene {
 
   // ---- 노트(텍스트) ----
   // 임시 Text로 렌더 크기를 측정한다(보드에 추가하지 않음). board.note.natural 채우기용.
-  measureNote(text: string, fontSize: number, color: string): { w: number; h: number } {
-    const t = new Text({ text: text.length > 0 ? text : ' ', style: this.noteStyle(fontSize, color) })
+  measureNote(text: string, fontSize: number, color: string, fontFamily?: string): { w: number; h: number } {
+    const t = new Text({ text: text.length > 0 ? text : ' ', style: this.noteStyle(fontSize, color, fontFamily) })
     const w = Math.max(1, Math.ceil(t.width))
     const h = Math.max(1, Math.ceil(t.height))
     t.destroy()
@@ -216,7 +216,7 @@ export class Scene {
 
   // 노트를 보드에 추가. anchor 0.5(중심 기준) → 이미지와 동일 배치 모델 → 기즈모 자동 편입.
   addNote(note: BoardNote): Text {
-    const t = new Text({ text: note.text, style: this.noteStyle(note.fontSize, note.color) })
+    const t = new Text({ text: note.text, style: this.noteStyle(note.fontSize, note.color, note.fontFamily) })
     t.anchor.set(0.5) // 중심 기준 배치/스케일/회전
     this.wireNode(t, note.id, 'text')
     this.applyNodeTransform(t, note)
@@ -231,17 +231,17 @@ export class Scene {
     const t = this.getNote(note.id)
     if (!t) return null
     t.text = note.text
-    t.style = this.noteStyle(note.fontSize, note.color)
+    t.style = this.noteStyle(note.fontSize, note.color, note.fontFamily)
     const natural = { w: Math.max(1, Math.ceil(t.width)), h: Math.max(1, Math.ceil(t.height)) }
     this.applyNodeTransform(t, note)
     this.setNodeNatural(note.id, natural)
     return natural
   }
 
-  // 노트 공통 텍스트 스타일. wordWrap 미사용(고유 박스=한 줄/입력 개행 그대로 측정).
-  private noteStyle(fontSize: number, color: string) {
+  // 노트 공통 텍스트 스타일. fontFamily 미지정 시 기본(Pretendard/맑은 고딕). wordWrap 미사용(고유 박스=한 줄/입력 개행 그대로 측정).
+  private noteStyle(fontSize: number, color: string, fontFamily?: string) {
     return {
-      fontFamily: 'Pretendard, -apple-system, "Malgun Gothic", sans-serif',
+      fontFamily: fontFamily && fontFamily.length > 0 ? fontFamily : 'Pretendard, -apple-system, "Malgun Gothic", sans-serif',
       fontSize,
       fill: color,
       align: 'left' as const,

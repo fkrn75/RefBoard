@@ -26,7 +26,7 @@ import { cropRectFromDrag, croppedSize } from './core/crop'
 import { expandByGroup, planGroup, planUngroup } from './core/group'
 import { visibleGrid } from './core/grid'
 import { OpacityControl } from './core/opacity-control'
-import { StyleControl, type StyleValues } from './core/style-control'
+import { StyleControl, type StyleValues, FONT_OPTIONS } from './core/style-control'
 import { packRefb } from './core/refb'
 import { exportSceneAll, exportSelection, renderThumbnail, downloadBlob } from './core/export-image'
 import { AutoSave } from './core/autosave'
@@ -81,6 +81,7 @@ let DRAW_COLOR = '#ff5a5a'
 let DRAW_WIDTH = 4
 let TEXT_COLOR = '#ffffff'
 let TEXT_FONT_SIZE = 28
+let TEXT_FONT_FAMILY = FONT_OPTIONS[0].value // 기본 글꼴(Pretendard/맑은 고딕)
 
 // 도구 버튼 활성 표시를 현재 activeTool에 맞춰 토글한다(선택 도구 포함, 한 번에 하나만 강조).
 const TOOL_ACTION_IDS: Record<ActiveTool, string> = {
@@ -332,14 +333,17 @@ function refreshStyleControl() {
     const draw = ts.find(isDrawingItem)
     const note = ts.find(isNoteItem)
     if (draw) v.width = draw.width
-    if (note) v.fontSize = note.fontSize
+    if (note) {
+      v.fontSize = note.fontSize
+      v.fontFamily = note.fontFamily ?? TEXT_FONT_FAMILY
+    }
     styleCtl.show(v)
     return
   }
   if (activeTool === 'pen' || activeTool === 'line' || activeTool === 'rect' || activeTool === 'ellipse' || activeTool === 'arrow') {
     styleCtl.show({ color: DRAW_COLOR, width: DRAW_WIDTH })
   } else if (activeTool === 'text') {
-    styleCtl.show({ color: TEXT_COLOR, fontSize: TEXT_FONT_SIZE })
+    styleCtl.show({ color: TEXT_COLOR, fontSize: TEXT_FONT_SIZE, fontFamily: TEXT_FONT_FAMILY })
   } else {
     styleCtl.hide()
   }
@@ -413,6 +417,33 @@ styleCtl.onFontChange = (s) => {
   styleCtl.onFontInput?.(s)
   styleCommitted = false
   afterEdit()
+}
+
+// 글꼴: 노트만 대상(select라 change만, 히스토리 1회). 웹폰트는 로드 후 정확 렌더되도록 fonts.load 뒤 재측정한다.
+styleCtl.onFontFamilyChange = (family) => {
+  const ns = styleTargets().filter(isNoteItem)
+  if (ns.length > 0) {
+    commit()
+    for (const n of ns) {
+      n.fontFamily = family
+      const m = scene.updateNote(n)
+      if (m) n.natural = m
+    }
+    afterEdit()
+    // 웹폰트가 아직 로드 전이면 폴백으로 그려졌을 수 있으니, 로드 완료 후 한 번 더 재측정/재렌더한다.
+    document.fonts
+      .load(`${ns[0].fontSize}px ${family}`)
+      .then(() => {
+        for (const n of ns) {
+          const m = scene.updateNote(n)
+          if (m) n.natural = m
+        }
+        afterEdit()
+      })
+      .catch(() => {})
+  } else {
+    TEXT_FONT_FAMILY = family
+  }
 }
 function updateMinimap() {
   // 미니맵이 숨김이면 contentBounds()의 O(n) 계산 자체를 생략(기본값이 숨김 — perf P1).
@@ -1126,6 +1157,7 @@ function openNoteEditor(world: { x: number; y: number }, existing?: BoardNote) {
   noteEditorWorld = world
   const fontSize = existing ? existing.fontSize : TEXT_FONT_SIZE
   const color = existing ? existing.color : TEXT_COLOR
+  const family = existing ? existing.fontFamily ?? TEXT_FONT_FAMILY : TEXT_FONT_FAMILY
   const ta = document.createElement('textarea')
   ta.value = existing ? existing.text : ''
   ta.spellcheck = false
@@ -1146,7 +1178,7 @@ function openNoteEditor(world: { x: number; y: number }, existing?: BoardNote) {
     'border-radius:4px',
     'background:rgba(0,0,0,.35)',
     `color:${color}`,
-    `font:${screenFont}px system-ui,-apple-system,Segoe UI,sans-serif`,
+    `font:${screenFont}px ${family}`,
     'line-height:1.2',
     'white-space:pre',
     'overflow:hidden',
@@ -1230,17 +1262,18 @@ function commitNoteEditor() {
     // updateNote가 다시 그린 실제 측정 크기를 돌려주므로 그 값으로 natural을 맞춘다(측정 일원화).
     const m = scene.updateNote(note)
     if (m) note.natural = m
-    else note.natural = scene.measureNote(text, note.fontSize, note.color)
+    else note.natural = scene.measureNote(text, note.fontSize, note.color, note.fontFamily)
     afterEdit()
   } else {
     // 신규: 빈 텍스트는 무시.
     if (text.length === 0) return
-    const natural = scene.measureNote(text, TEXT_FONT_SIZE, TEXT_COLOR)
+    const natural = scene.measureNote(text, TEXT_FONT_SIZE, TEXT_COLOR, TEXT_FONT_FAMILY)
     const note: BoardNote = {
       id: genId(),
       type: 'note',
       text,
       fontSize: TEXT_FONT_SIZE,
+      fontFamily: TEXT_FONT_FAMILY,
       color: TEXT_COLOR,
       natural,
       transform: { x: noteEditorWorld.x, y: noteEditorWorld.y, scale: 1, rotation: 0 },
@@ -1251,6 +1284,7 @@ function commitNoteEditor() {
     commit()
     board.items.push(note)
     void scene.addNote(note)
+    ensureNoteFont(note) // 웹폰트면 로드 후 재렌더(FOUT 보정)
     hint.style.display = 'none'
     sel.set([note.id])
     updateMinimap()
@@ -1260,6 +1294,20 @@ function commitNoteEditor() {
 // 텍스트 편집 취소(신규=버림, 기존=원본 유지).
 function cancelNoteEditor() {
   disposeNoteEditor()
+}
+
+// 웹폰트로 만든 노트는 폰트 로드 전이면 폴백으로 렌더됐을 수 있다(PIXI.Text는 생성 시점 글꼴로 고정).
+// 해당 글꼴 로드 완료 후 한 번 더 재측정/재렌더해 FOUT을 보정한다(generic 폰트는 즉시 resolve).
+function ensureNoteFont(note: BoardNote) {
+  if (!note.fontFamily) return
+  document.fonts
+    .load(`${note.fontSize}px ${note.fontFamily}`)
+    .then(() => {
+      const m = scene.updateNote(note)
+      if (m) note.natural = m
+      if (sel.values().includes(note.id)) afterEdit()
+    })
+    .catch(() => {})
 }
 
 // ---- 댓글(이미지에 부착하는 메모) ----

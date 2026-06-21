@@ -1,26 +1,40 @@
-// 스타일 컨트롤 오버레이 — 선택 아이템(노트/드로잉) 또는 활성 도구의 색·굵기·글자크기를 조절하는 플로팅 패널.
+// 스타일 컨트롤 오버레이 — 선택 아이템(노트/드로잉) 또는 활성 도구의 색·굵기·글자크기·글꼴을 조절하는 플로팅 패널.
 //
 // 설계 원칙(opacity-control.ts와 동일):
 //  - Scene/PixiJS/board에 의존하지 않는 독립 클래스. 자체 DOM을 host에 position:absolute로 얹는다.
 //    실제 값 변경/히스토리 적재는 콜백(on*Input=미리보기 / on*Change=확정)으로 main에 위임한다.
 //  - 투명도 패널(top:12)과 겹치지 않게 그 아래(top:52)에 배치한다.
-//  - 세 항목(색/굵기/글자크기)을 개별 그룹으로 두고, show()에 넘긴 항목만 표시한다
-//    (드로잉=색+굵기, 텍스트=색+글자크기, 둘 다 없으면 자동 숨김).
+//  - 네 항목(색/굵기/글자크기/글꼴)을 개별 그룹으로 두고, show()에 넘긴 항목만 표시한다
+//    (드로잉=색+굵기, 텍스트=색+글자크기+글꼴, 둘 다 없으면 자동 숨김).
 //
 // 값 규약:
 //  - on*Input: 드래그/선택 중 실시간(미리보기용, 히스토리 X) — 'input' 이벤트.
-//  - on*Change: 변경 확정(놓을 때, 히스토리 적재용) — 'change' 이벤트.
+//  - on*Change: 변경 확정(놓을 때, 히스토리 적재용) — 'change' 이벤트. (글꼴 select는 change만)
 
 // ---- 시각 상수 ----
 const SC_MARGIN = 12 // 우 여백(px)
 const SC_TOP = 52 // 투명도 패널(top:12 + 높이) 아래
 const SC_Z_INDEX = '60' // 미니맵(50)보다 위
 
+// 글꼴 선택 목록(시스템 generic + 한글 웹폰트). value=CSS font-family.
+// 웹폰트(Noto/Nanum)는 index.html·viewer.html의 <link>로 로드된다. 없으면 generic 폴백으로 표시.
+export const FONT_OPTIONS: { label: string; value: string }[] = [
+  { label: '기본', value: 'Pretendard, -apple-system, "Malgun Gothic", sans-serif' },
+  { label: '고딕', value: 'sans-serif' },
+  { label: '명조', value: 'serif' },
+  { label: '고정폭', value: 'monospace' },
+  { label: 'Noto Sans', value: '"Noto Sans KR", sans-serif' },
+  { label: '나눔고딕', value: '"Nanum Gothic", sans-serif' },
+  { label: '나눔명조', value: '"Nanum Myeongjo", serif' },
+  { label: '손글씨', value: '"Nanum Pen Script", cursive' },
+]
+
 // show()로 넘기는 값 — 정의된 항목만 패널에 표시된다.
 export interface StyleValues {
   color?: string // #rrggbb — 있으면 색 그룹 표시
   width?: number // 선 굵기(px) — 있으면 굵기 그룹 표시
   fontSize?: number // 글자 크기(px) — 있으면 글자크기 그룹 표시
+  fontFamily?: string // CSS font-family — 있으면 글꼴 드롭다운 표시
 }
 
 export class StyleControl {
@@ -33,6 +47,8 @@ export class StyleControl {
   private fontGroup: HTMLLabelElement
   private fontSlider: HTMLInputElement
   private fontLabel: HTMLSpanElement
+  private familyGroup: HTMLLabelElement
+  private familySelect: HTMLSelectElement
   private visible = false
 
   // 미리보기(드래그 중, 히스토리 X) / 확정(놓을 때, 히스토리 O)
@@ -42,6 +58,7 @@ export class StyleControl {
   onWidthChange?: (w: number) => void
   onFontInput?: (s: number) => void
   onFontChange?: (s: number) => void
+  onFontFamilyChange?: (family: string) => void // 글꼴 select 변경(확정)
 
   constructor(host: HTMLElement) {
     const root = document.createElement('div')
@@ -114,9 +131,29 @@ export class StyleControl {
     fontGroup.appendChild(fontSlider)
     fontGroup.appendChild(fontLabel)
 
+    // ---- 글꼴 그룹(드롭다운) ----
+    const familyGroup = document.createElement('label')
+    familyGroup.style.cssText = 'display:inline-flex;align-items:center;gap:6px;cursor:pointer'
+    const familyTitle = document.createElement('span')
+    familyTitle.textContent = '글꼴'
+    familyTitle.style.cssText = 'opacity:0.8;white-space:nowrap'
+    const familySelect = document.createElement('select')
+    familySelect.style.cssText =
+      'background:rgba(40,40,40,.95);color:#fff;border:1px solid rgba(255,255,255,.25);border-radius:4px;padding:2px 4px;cursor:pointer;font:12px system-ui,sans-serif'
+    for (const opt of FONT_OPTIONS) {
+      const o = document.createElement('option')
+      o.value = opt.value
+      o.textContent = opt.label
+      o.style.cssText = `font-family:${opt.value}` // 옵션 글자를 해당 글꼴로 미리보기
+      familySelect.appendChild(o)
+    }
+    familyGroup.appendChild(familyTitle)
+    familyGroup.appendChild(familySelect)
+
     root.appendChild(colorGroup)
     root.appendChild(widthGroup)
     root.appendChild(fontGroup)
+    root.appendChild(familyGroup)
 
     // 'input' = 조작 중 실시간, 'change' = 놓아서 확정.
     colorInput.addEventListener('input', () => this.onColorInput?.(colorInput.value))
@@ -141,6 +178,7 @@ export class StyleControl {
       fontLabel.textContent = String(s)
       this.onFontChange?.(s)
     })
+    familySelect.addEventListener('change', () => this.onFontFamilyChange?.(familySelect.value))
 
     // 패널 내부의 포인터/휠이 뒤 캔버스(팬/줌)로 전파되지 않도록 차단.
     root.addEventListener('pointerdown', stopEvent)
@@ -156,6 +194,8 @@ export class StyleControl {
     this.fontGroup = fontGroup
     this.fontSlider = fontSlider
     this.fontLabel = fontLabel
+    this.familyGroup = familyGroup
+    this.familySelect = familySelect
   }
 
   // 주어진 항목만 표시 + 값 동기화(콜백 없음). 셋 다 없으면 hide.
@@ -183,6 +223,15 @@ export class StyleControl {
       any = true
     } else {
       this.fontGroup.style.display = 'none'
+    }
+    if (v.fontFamily !== undefined) {
+      // 목록에 없는 값이면 첫 옵션(기본)으로 폴백 표시.
+      const known = FONT_OPTIONS.some((o) => o.value === v.fontFamily)
+      this.familySelect.value = known ? v.fontFamily : FONT_OPTIONS[0].value
+      this.familyGroup.style.display = ''
+      any = true
+    } else {
+      this.familyGroup.style.display = 'none'
     }
     if (!any) {
       this.hide()

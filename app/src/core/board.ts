@@ -50,6 +50,7 @@ export interface BoardNote {
   type: 'note'
   text: string                       // 표시 문자열(평문)
   fontSize: number                   // 기준 폰트 크기(px, scale=1 기준). 확대는 transform.scale로
+  fontFamily?: string                // 글꼴(CSS font-family). 없으면 기본(Pretendard/맑은 고딕) — 하위호환
   color: string                      // 글자색(#rrggbb)
   natural: { w: number; h: number }  // 렌더된 텍스트 박스 크기(측정값). AABB·기즈모 산출 기준
   transform: Transform
