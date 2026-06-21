@@ -112,6 +112,8 @@ async function staleWhileRevalidate(req) {
       return res
     })
     .catch(() => null)
-  // 캐시 우선 즉시 반환, 없으면 네트워크를 기다린다. 둘 다 없으면 에러 전파.
-  return cached || (await fetching) || Promise.reject(new Error('오프라인 상태이며 캐시가 없습니다.'))
+  // 캐시 우선 즉시 반환, 없으면 네트워크를 기다린다. 둘 다 없으면(오프라인+캐시미스)
+  // networkFirst와 동일하게 503 Response로 폴백한다 — respondWith가 reject되면 브라우저가
+  // 네트워크 오류 화면을 띄우므로(비대칭), 절대 reject되지 않게 폴백 Response를 반환한다.
+  return cached || (await fetching) || new Response('오프라인 상태이며 캐시가 없습니다.', { status: 503, statusText: 'Offline' })
 }

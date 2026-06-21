@@ -419,9 +419,9 @@ styleCtl.onFontInput = (s) => {
   }
 }
 styleCtl.onFontChange = (s) => {
+  // onFontInput이 노트 분기에서 이미 afterEdit를 호출하므로 여기서 또 부르지 않는다(렌더 2배 방지).
   styleCtl.onFontInput?.(s)
   styleCommitted = false
-  afterEdit()
 }
 
 // 글꼴: 노트만 대상(select라 change만, 히스토리 1회). 웹폰트는 로드 후 정확 렌더되도록 fonts.load 뒤 재측정한다.
@@ -440,7 +440,10 @@ styleCtl.onFontFamilyChange = (family) => {
     document.fonts
       .load(`${ns[0].fontSize}px ${family}`)
       .then(() => {
-        for (const n of ns) {
+        // 호출~resolve 사이 삭제됐을 수 있으니 board.items에 아직 있는 노트만 재측정(stale 참조 보정).
+        const alive = ns.filter((n) => board.items.some((i) => i.id === n.id))
+        if (alive.length === 0) return
+        for (const n of alive) {
           const m = scene.updateNote(n)
           if (m) n.natural = m
         }
@@ -791,6 +794,11 @@ scene.onPointerMove = (p: ScenePointer) => {
         const thr = 8 / cam.zoom
         let adj = snapToNeighbors(a, drag.others, thr)
         if (adj.dx === 0 && adj.dy === 0) adj = snapDeltaToGrid(a.minX, a.minY, 32)
+        // Shift로 한 축을 0으로 고정했으면 그 축의 스냅 보정 성분도 0으로(축 제약이 깨지지 않게).
+        if (p.shift) {
+          if (Math.abs(p.world.x - drag.start.x) >= Math.abs(p.world.y - drag.start.y)) adj.dy = 0
+          else adj.dx = 0
+        }
         if (adj.dx !== 0 || adj.dy !== 0) {
           for (const [id, o] of drag.origins) {
             const img = board.items.find((i) => i.id === id)
@@ -938,7 +946,8 @@ function applyZOrder(fn: (items: BoardItem[], ids: Set<string> | string[]) => vo
 }
 function syncZIndex() {
   for (const im of board.items) {
-    const s = scene.getSprite(im.id)
+    // getNode는 타입무관(Sprite|Text|Graphics)이라 노트·드로잉의 z순서도 시각 반영된다(getSprite는 이미지만).
+    const s = scene.getNode(im.id)
     if (s) s.zIndex = im.z
   }
 }
@@ -1216,9 +1225,10 @@ function openNoteEditor(world: { x: number; y: number }, existing?: BoardNote) {
   })
   // 포커스 잃으면 확정(다른 곳 클릭 시 자연스럽게 마무리).
   ta.addEventListener('blur', () => commitNoteEditor())
-  // 재편집이면 해당 노트의 스프라이트를 잠시 숨겨 편집 중 이중 표시를 막는다.
+  // 재편집이면 해당 노트의 노드를 잠시 숨겨 편집 중 이중 표시를 막는다.
+  // 노트는 Text 노드라 getSprite(이미지 전용)는 undefined → getNode(타입무관)로 실제 숨김 처리.
   if (existing) {
-    const s = scene.getSprite(existing.id)
+    const s = scene.getNode(existing.id)
     if (s) s.visible = false
   }
   setTimeout(() => {
@@ -1234,7 +1244,8 @@ function disposeNoteEditor() {
   noteEditor = null
   ed.remove()
   if (editingNoteId) {
-    const s = scene.getSprite(editingNoteId)
+    // 숨김 때와 대칭으로 getNode 사용(Text 노드라 getSprite는 undefined → 재표시 안 됨).
+    const s = scene.getNode(editingNoteId)
     if (s) s.visible = true
   }
   editingNoteId = null
@@ -1844,6 +1855,9 @@ window.addEventListener('keydown', (e) => {
   // 보조 바인딩(키맵 테이블엔 Delete/Ctrl+Shift+Z만 등록): Backspace=삭제, Ctrl+Y=다시실행.
   const ctrl = e.ctrlKey || e.metaKey
   if (e.key === 'Backspace') {
+    // 입력 필드 포커스는 위에서 이미 return했으므로 여기 Backspace는 항상 삭제 경로다.
+    // 웹뷰 뒤로가기(history back) 유발을 막기 위해 기본 동작을 차단한다.
+    e.preventDefault()
     deleteSelected()
   } else if (ctrl && e.key.toLowerCase() === 'y') {
     e.preventDefault()

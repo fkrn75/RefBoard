@@ -26,6 +26,10 @@ interface PointerState {
 // 탭으로 인정할 임계값: 이동 거리(px)와 지속 시간(ms). 둘 중 하나라도 초과하면 탭 아님.
 const TAP_MAX_MOVE = 10
 const TAP_MAX_MS = 300
+// 핀치(2손가락) 해제 후 이 시간(ms) 안에 끝난 제스처는 탭으로 인정하지 않는다.
+// 빠른 핀치에서 두 손가락을 떼는 순서가 어긋나면(한 손가락이 살짝 먼저) 잔여 단일터치가
+// 짧은 탭으로 오인돼 라이트박스가 잘못 열리는 것을 막는다(쿨다운). 단일터치 시작 검사와 병행.
+const PINCH_TAP_COOLDOWN_MS = 250
 
 // el에 터치 제스처를 부착하고, 해제 함수를 반환한다.
 export function attachTouchGestures(el: HTMLElement, handlers: TouchGestureHandlers): () => void {
@@ -41,7 +45,11 @@ export function attachTouchGestures(el: HTMLElement, handlers: TouchGestureHandl
   let tapStartTime = 0
   let tapMoved = 0
   // 핀치(2손가락)가 한 번이라도 발생했으면 이 제스처는 탭이 아니다.
+  // (모든 포인터가 0이 될 때까지 유지 → 다음 단일터치 시작 시에만 리셋. 포인터 캡처 유실로
+  //  두 번째 down을 놓치는 등의 엣지에 대비해 쿨다운(아래)으로 이중 방어한다.)
   let multiTouched = false
+  // 직전 핀치가 끝난(2→1 또는 2→0으로 떨어진) 시각. 쿨다운 내 탭은 무시(핀치 잔여 탭 오인 방지).
+  let lastPinchEndTime = 0
 
   // clientX/Y → el 로컬 좌표로 환산. 매 이벤트마다 rect를 읽어 스크롤/리사이즈에 안전.
   const toLocal = (e: PointerEvent): PointerState => {
@@ -128,13 +136,20 @@ export function attachTouchGestures(el: HTMLElement, handlers: TouchGestureHandl
 
     if (pointers.size < 2) {
       // 핀치 종료(또는 애초에 핀치 아님): 기준 거리 리셋.
+      // lastPinchDist가 아직 non-null이면 "방금 핀치가 끝났다"는 신호 → 종료 시각을 찍어
+      // 잔여 단일터치(2→1로 떨어진 직후 떼는 손가락)가 탭으로 오인되는 것을 쿨다운으로 막는다.
+      if (lastPinchDist != null) lastPinchEndTime = performance.now()
       lastPinchDist = null
     }
 
     if (pointers.size === 0) {
       // 마지막 포인터가 떨어진 순간 탭 여부 판정.
-      const elapsed = performance.now() - tapStartTime
-      if (!multiTouched && tapMoved <= TAP_MAX_MOVE && elapsed <= TAP_MAX_MS) {
+      const now = performance.now()
+      const elapsed = now - tapStartTime
+      // 직전 핀치 종료로부터 쿨다운이 지나지 않았으면 탭 아님(빠른 핀치 해제의 손가락 떼는 순서
+      // 역전으로 생기는 오개방 방지). multiTouched(이번 제스처 중 2손가락 관측)와 함께 이중 방어.
+      const afterPinch = now - lastPinchEndTime < PINCH_TAP_COOLDOWN_MS
+      if (!multiTouched && !afterPinch && tapMoved <= TAP_MAX_MOVE && elapsed <= TAP_MAX_MS) {
         handlers.onTap?.(tapStartX, tapStartY)
       }
     }
