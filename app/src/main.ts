@@ -361,6 +361,9 @@ styleCtl.onColorInput = (hex) => {
       it.color = hex
       syncNode(it) // 노트=updateNote / 드로잉=updateDrawing로 재렌더(색 반영)
     }
+    // 마지막 사용 색을 다음 생성 기본값에도 반영해 편집 중 값이 유지되게 한다.
+    if (ts.some(isDrawingItem)) DRAW_COLOR = hex
+    if (ts.some(isNoteItem)) TEXT_COLOR = hex
   } else if (activeTool === 'text') {
     TEXT_COLOR = hex
   } else {
@@ -385,6 +388,7 @@ styleCtl.onWidthInput = (w) => {
       d.width = w
       scene.updateDrawing(d)
     }
+    DRAW_WIDTH = w // 마지막 굵기를 다음 생성 기본값에도 반영
   } else {
     DRAW_WIDTH = w
   }
@@ -409,6 +413,7 @@ styleCtl.onFontInput = (s) => {
       if (m) n.natural = m
     }
     afterEdit() // 박스 크기 변화 → 선택 외곽선/기즈모 갱신
+    TEXT_FONT_SIZE = s // 마지막 크기를 다음 생성 기본값에도 반영
   } else {
     TEXT_FONT_SIZE = s
   }
@@ -430,6 +435,7 @@ styleCtl.onFontFamilyChange = (family) => {
       if (m) n.natural = m
     }
     afterEdit()
+    TEXT_FONT_FAMILY = family // 마지막 글꼴을 다음 생성 기본값에도 반영
     // 웹폰트가 아직 로드 전이면 폴백으로 그려졌을 수 있으니, 로드 완료 후 한 번 더 재측정/재렌더한다.
     document.fonts
       .load(`${ns[0].fontSize}px ${family}`)
