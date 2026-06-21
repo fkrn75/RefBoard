@@ -40,6 +40,8 @@ export interface BoardImage {
   groupId?: string             // 그룹 식별자(같은 값=한 그룹, 없으면 미그룹) — Phase 2.6 그룹
   z: number                    // 캔버스 내 레이어 순서
   comment?: string             // 이미지에 부착하는 메모(코멘트) — Alt+C로 편집, 없으면 미부착
+  name?: string                // 원본 파일명(정렬/표시용). 없으면 id로 폴백 — 선택 필드(하위호환)
+  addedAt?: number             // 보드에 추가된 시각(Date.now() epoch ms). 없으면 z로 폴백 — 선택 필드(하위호환)
 }
 
 // 텍스트 노트 — 보드 위 글자 박스(1차는 평문, 리치텍스트는 추후).

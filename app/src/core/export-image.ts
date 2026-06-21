@@ -13,8 +13,8 @@
 
 import { Container, Rectangle, Bounds, type Renderer, type Sprite } from 'pixi.js'
 
-// 내보내기 포맷. png=무손실/투명 보존, jpg=손실/배경 합성 필요.
-export type ExportFormat = 'png' | 'jpg'
+// 내보내기 포맷. png=무손실/투명 보존, jpg=손실/배경 합성 필요, bmp=무압축(직접 인코딩).
+export type ExportFormat = 'png' | 'jpg' | 'bmp'
 
 // 공통 옵션.
 export interface ExportOptions {
@@ -24,9 +24,11 @@ export interface ExportOptions {
   padding?: number // 추출 영역 가장자리 여백(world 로컬 px). 기본 0
 }
 
-// 포맷별 MIME. jpg는 image/jpeg.
+// 포맷별 MIME. jpg는 image/jpeg, bmp는 image/bmp.
 function mimeOf(format: ExportFormat): string {
-  return format === 'jpg' ? 'image/jpeg' : 'image/png'
+  if (format === 'jpg') return 'image/jpeg'
+  if (format === 'bmp') return 'image/bmp'
+  return 'image/png'
 }
 
 // jpg 품질(0~1). 무손실 png에는 미적용.
@@ -65,6 +67,94 @@ function canvasToBlob(
   })
 }
 
+// ---- BMP 무압축 인코더 ----
+// canvas.toBlob('image/bmp')는 브라우저 표준이 아니라(대부분 미지원/png 폴백) 직접 인코딩한다.
+// 형식: BITMAPFILEHEADER(14) + BITMAPINFOHEADER(40) + 픽셀 데이터.
+//   - 24bit BGR, bottom-up(마지막 행부터 저장), 각 행은 4바이트 경계로 패딩.
+//   - 알파는 BMP 24bit가 표현 못 하므로, png/jpg와 달리 불투명 RGB만 기록(투명은 무시).
+//     (투명 보존이 필요하면 png를 쓰는 게 맞음 — bmp는 무압축 RGB 산출이 목적.)
+
+// ICanvas에서 2D 컨텍스트로 ImageData(RGBA)를 추출한다. width/height는 캔버스 픽셀 크기.
+function canvasToImageData(canvas: {
+  width: number
+  height: number
+  getContext: (id: '2d') => unknown
+}): ImageData {
+  const ctx = canvas.getContext('2d') as
+    | (CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D)
+    | null
+  if (!ctx) throw new Error('BMP 인코딩: 2D 컨텍스트를 얻지 못했습니다.')
+  return ctx.getImageData(0, 0, canvas.width, canvas.height)
+}
+
+// RGBA ImageData → 무압축 24bit BMP 바이트 배열.
+function encodeBmp(image: ImageData): Uint8Array {
+  const { width, height, data } = image
+  // 각 행 바이트 = 폭*3, 4바이트 정렬을 위한 패딩 추가.
+  const rowBytes = width * 3
+  const rowPadded = (rowBytes + 3) & ~3 // 4의 배수로 올림
+  const pixelArraySize = rowPadded * height
+  const fileHeaderSize = 14
+  const infoHeaderSize = 40
+  const offset = fileHeaderSize + infoHeaderSize // 픽셀 데이터 시작 오프셋
+  const fileSize = offset + pixelArraySize
+
+  const buf = new ArrayBuffer(fileSize)
+  const view = new DataView(buf)
+  const bytes = new Uint8Array(buf)
+
+  // ── BITMAPFILEHEADER (14바이트, 리틀엔디언) ──
+  view.setUint8(0, 0x42) // 'B'
+  view.setUint8(1, 0x4d) // 'M'
+  view.setUint32(2, fileSize, true) // 전체 파일 크기
+  view.setUint32(6, 0, true) // 예약(0)
+  view.setUint32(10, offset, true) // 픽셀 데이터까지의 오프셋
+
+  // ── BITMAPINFOHEADER (40바이트) ──
+  view.setUint32(14, infoHeaderSize, true) // 헤더 크기(40)
+  view.setInt32(18, width, true) // 폭
+  view.setInt32(22, height, true) // 높이(양수=bottom-up)
+  view.setUint16(26, 1, true) // 평면 수(항상 1)
+  view.setUint16(28, 24, true) // 비트/픽셀(24bit BGR)
+  view.setUint32(30, 0, true) // 압축 없음(BI_RGB=0)
+  view.setUint32(34, pixelArraySize, true) // 픽셀 데이터 크기
+  view.setInt32(38, 2835, true) // 가로 해상도(픽셀/미터, 72dpi≈2835)
+  view.setInt32(42, 2835, true) // 세로 해상도
+  view.setUint32(46, 0, true) // 팔레트 색 수(0=기본)
+  view.setUint32(50, 0, true) // 중요 색 수(0=전부)
+
+  // ── 픽셀 데이터: bottom-up(맨 아래 행부터), BGR 순, 행 끝 패딩 ──
+  let p = offset
+  for (let y = height - 1; y >= 0; y--) {
+    let rowStart = y * width * 4 // RGBA 소스의 해당 행 시작 인덱스
+    for (let x = 0; x < width; x++) {
+      // BMP는 BGR 순서. 알파는 무시(불투명 RGB만).
+      bytes[p++] = data[rowStart + 2] // B
+      bytes[p++] = data[rowStart + 1] // G
+      bytes[p++] = data[rowStart] // R
+      rowStart += 4
+    }
+    // 행 패딩(0으로 채움)으로 4바이트 경계 정렬.
+    for (let pad = rowBytes; pad < rowPadded; pad++) bytes[p++] = 0
+  }
+
+  return bytes
+}
+
+// ICanvas → BMP Blob. ImageData를 뽑아 encodeBmp로 바이트화한 뒤 Blob으로 감싼다.
+function canvasToBmpBlob(canvas: {
+  width: number
+  height: number
+  getContext: (id: '2d') => unknown
+}): Blob {
+  const image = canvasToImageData(canvas)
+  const bytes = encodeBmp(image)
+  // TS 5.7 lib에서 Uint8Array<ArrayBufferLike>는 BlobPart에 직접 안 맞으므로
+  // 백킹 ArrayBuffer를 잘라(복사 1회) 넘긴다(main.ts 다운로드 경로와 동일 패턴).
+  const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+  return new Blob([buf], { type: 'image/bmp' })
+}
+
 // 여러 sprite의 합집합 경계를 "world(부모) 로컬 좌표"의 Rectangle로 구한다.
 // 각 sprite의 자기-로컬 경계(getLocalBounds)를 localTransform(=부모 좌표로의 투영)으로 변환해 누적.
 // 대상이 비었거나 경계가 비정상(빈 Bounds)이면 null.
@@ -101,9 +191,13 @@ async function extractBlob(
     target,
     ...(frame ? { frame } : {}),
     resolution: o.scale,
-    // png은 투명 유지(clearColor 미지정), jpg는 배경색으로 클리어.
-    ...(o.format === 'jpg' ? { clearColor: o.bg } : {}),
+    // png은 투명 유지(clearColor 미지정), jpg/bmp는 배경색으로 클리어(둘 다 투명 미보존).
+    ...(o.format === 'jpg' || o.format === 'bmp' ? { clearColor: o.bg } : {}),
   })
+  // bmp는 toBlob 미지원이므로 직접 인코딩(ImageData→무압축 24bit BMP).
+  if (o.format === 'bmp') {
+    return canvasToBmpBlob(canvas as { width: number; height: number; getContext: (id: '2d') => unknown })
+  }
   const mime = mimeOf(o.format)
   return canvasToBlob(canvas, mime, o.format === 'jpg' ? JPG_QUALITY : undefined)
 }
@@ -264,9 +358,9 @@ export function downloadBlob(blob: Blob, filename: string): void {
 /**
  * 포맷에 맞는 확장자를 파일명 베이스에 붙인다(헬퍼).
  * @param base    확장자 없는 파일명 베이스(예: 'board')
- * @param format  'png' | 'jpg'
+ * @param format  'png' | 'jpg' | 'bmp'
  */
 export function withImageExt(base: string, format: ExportFormat): string {
-  const ext = format === 'jpg' ? '.jpg' : '.png'
+  const ext = format === 'jpg' ? '.jpg' : format === 'bmp' ? '.bmp' : '.png'
   return base.toLowerCase().endsWith(ext) ? base : base + ext
 }

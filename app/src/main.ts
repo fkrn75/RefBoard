@@ -28,9 +28,12 @@ import { visibleGrid } from './core/grid'
 import { OpacityControl } from './core/opacity-control'
 import { StyleControl, type StyleValues, FONT_OPTIONS } from './core/style-control'
 import { packRefb } from './core/refb'
-import { exportSceneAll, exportSelection, renderThumbnail, downloadBlob } from './core/export-image'
+import { exportSceneAll, exportSelection, exportEach, renderThumbnail, downloadBlob, withImageExt, type ExportFormat } from './core/export-image'
 import { AutoSave } from './core/autosave'
-import { addRecent, setLastSession, getLastSession } from './core/recent'
+import { addRecent, setLastSession, getLastSession, getRecent, clearRecent } from './core/recent'
+import { arrangeGrid, type SortItem, type SortKey } from './core/arrange-sort'
+import { pickColor, showColorSwatch, copyColor } from './core/eyedropper'
+import { openRecentPicker } from './core/recent-picker'
 import { applyTheme, getTheme, onThemeChange } from './core/theme'
 import { registerActions, matchKey, getActions, DEFAULT_ACTIONS, type Action } from './core/keymap'
 import { openPalette, isPaletteOpen } from './core/command-palette'
@@ -73,7 +76,7 @@ const toolbar = createToolbar({ onAction: (id) => runAction(id), isDesktop: isDe
 // ---- 활성 도구(텍스트·드로잉) 상태 ----
 // 'select'(기본)에서만 기존 선택/이동/러버밴드/기즈모가 동작한다. 나머지 도구는 캔버스 입력을
 // 자기 동작(텍스트 배치 · 드로잉 드래그 · 지우개)으로 가로챈다(scene.onPointer* 진입부에서 분기).
-type ActiveTool = 'select' | 'text' | 'pen' | 'line' | 'rect' | 'ellipse' | 'arrow' | 'eraser'
+type ActiveTool = 'select' | 'text' | 'pen' | 'line' | 'rect' | 'ellipse' | 'arrow' | 'eraser' | 'eyedropper'
 let activeTool: ActiveTool = 'select'
 // 드로잉/텍스트 "현재 그리기" 기본 스타일(scale=1 기준). StyleControl로 실시간 변경한다.
 // 선택 아이템이 없을 때(도구 모드)의 변경은 "다음 생성" 기본값을 바꾸고, 선택이 있으면 그 아이템을 바꾼다.
@@ -93,6 +96,7 @@ const TOOL_ACTION_IDS: Record<ActiveTool, string> = {
   ellipse: 'tool.ellipse',
   arrow: 'tool.arrow',
   eraser: 'tool.eraser',
+  eyedropper: 'tool.eyedropper',
 }
 function setActiveTool(tool: ActiveTool) {
   if (activeTool === tool) return
@@ -118,6 +122,7 @@ const TOOL_HINT: Record<ActiveTool, string> = {
   ellipse: '타원: 드래그',
   arrow: '화살표: 드래그',
   eraser: '지우개: 드로잉을 클릭/드래그해 삭제',
+  eyedropper: '스포이드: 캔버스를 클릭해 색을 추출(클립보드 복사)',
 }
 
 // ---- 드로잉 미리보기 오버레이(2D 캔버스) ----
@@ -654,6 +659,12 @@ scene.onPointerDown = (p: ScenePointer) => {
     eraseAt(p.hitId) // 클릭 적중 드로잉 삭제 + 이후 드래그도 onPointerMove에서 지움
     return
   }
+  if (activeTool === 'eyedropper') {
+    // 스포이드: 클릭 지점의 색을 추출한다. EyeDropper 지원 브라우저는 좌표 무관(화면 어디서나),
+    // 폴백은 stage 픽셀에서 클릭 화면좌표의 색을 읽는다. 성공 시 스와치 표시 + 클립보드 복사.
+    void pickColorAt(p)
+    return
+  }
   if (activeTool !== 'select') {
     // 펜/직선/사각형/타원/화살표: 드래그 시작.
     drawState = { tool: activeTool as DrawingTool, points: [{ x: p.world.x, y: p.world.y }], committed: false }
@@ -1158,6 +1169,29 @@ function eraseAt(hitId: string | null) {
   if (board.items.length === 0) hint.style.display = ''
 }
 
+// ---- 스포이드(색 추출) ----
+// 클릭 지점의 색을 추출한다. 추출 색은 스와치로 잠시 보여주고 클립보드(HEX)에 복사한다.
+//  - EyeDropper 지원 브라우저: 좌표와 무관하게 화면 전체에서 픽킹(pickColor 내부에서 처리).
+//  - 폴백: renderer.extract 대상(app.stage = 화면 전체)에서 클릭 화면좌표의 픽셀색을 읽는다.
+//    ScenePointer는 월드 좌표만 주므로 worldToScreen으로 화면좌표를 복원해 넘긴다(cam 역변환).
+async function pickColorAt(p: ScenePointer) {
+  const sp = worldToScreen(p.world.x, p.world.y)
+  try {
+    const color = await pickColor({
+      renderer: scene.app.renderer,
+      stage: scene.app.stage, // 화면 전체 루트(world는 그 자식). 화면좌표 기준 폴백 픽킹 대상
+      screenX: sp.x,
+      screenY: sp.y,
+    })
+    if (!color) return // 사용자가 취소(EyeDropper Esc 등)
+    showColorSwatch(color, sp.x, sp.y)
+    await copyColor(color)
+    showToast(`색 추출: ${color.hex} (복사됨)`, true)
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : '색 추출 실패', true)
+  }
+}
+
 // ---- 텍스트 노트 ----
 // 캔버스 위에 DOM <textarea>를 띄워 입력받고, 확정 시 measureNote로 natural을 구해 BoardNote를 만든다.
 // editingNoteId가 있으면 "기존 노트 재편집", 없으면 "새 노트 생성"이다.
@@ -1477,7 +1511,7 @@ function doDistribute(axis: 'h' | 'v') {
   applyDeltas(distribute(items, axis))
   afterEdit()
 }
-function doNormalize(mode: 'width' | 'height' | 'scale') {
+function doNormalize(mode: 'width' | 'height' | 'scale' | 'area') {
   const items = alignItems()
   if (items.length < 2) return
   commit()
@@ -1619,6 +1653,163 @@ async function exportSel() {
   }
 }
 
+// ---- 개별 내보내기(Export Each): 아이템마다 파일 1장씩 ----
+// 전체 또는 선택 아이템을 각각 PNG로 떨어뜨린다. 파일명=원본 name(없으면 id) + 순번.
+// 동일 이름 충돌·다운로드 순번 보장을 위해 파일명 끝에 "-01" 식 인덱스를 붙인다.
+async function exportEachItems(scope: 'all' | 'sel') {
+  // 대상 id: 'sel'은 현재 선택, 'all'은 씬 전체. 개별 내보내기는 이미지만 의미가 있으므로
+  // 이미지 아이템만 추린다(노트/드로잉은 단독 PNG 의미가 약하고 getSprite도 이미지 전용).
+  const baseIds = scope === 'sel' ? sel.values() : scene.allIds()
+  const ids = baseIds.filter((id) => {
+    const it = board.items.find((i) => i.id === id)
+    return it != null && isImageItem(it)
+  })
+  if (ids.length === 0) {
+    showToast(scope === 'sel' ? '내보낼 이미지를 선택하세요' : '내보낼 이미지가 없습니다', true)
+    return
+  }
+  const fmt: ExportFormat = 'png' // 현재 기본 포맷(향후 설정 연동 가능)
+  const restoreOverlays = scene.hideOverlays()
+  try {
+    showLoading(`개별 내보내기… ${ids.length}장`)
+    const results = await exportEach(scene.app.renderer, scene.world, ids, (id) => scene.getSprite(id), {
+      format: fmt,
+      padding: 0,
+    })
+    if (results.length === 0) {
+      showToast('내보낼 항목이 없습니다', true)
+      return
+    }
+    // 파일명: 원본 name(없으면 id) + 0패딩 순번. 같은 이름이 여러 장이어도 순번으로 구분된다.
+    const pad = String(results.length).length
+    results.forEach((res, i) => {
+      const im = board.items.find((it) => it.id === res.id)
+      const baseName = (im && isImageItem(im) && im.name ? stripExt(im.name) : res.id)
+      const seq = String(i + 1).padStart(pad, '0')
+      downloadBlob(res.blob, withImageExt(`${baseName}-${seq}`, fmt))
+    })
+    showToast(`${results.length}장을 개별 파일로 내보냈습니다`, true)
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : '개별 내보내기 실패')
+  } finally {
+    restoreOverlays()
+    hideLoading()
+  }
+}
+// 파일명에서 확장자만 제거(개별 내보내기 베이스명 정리용). 점이 없으면 원본 그대로.
+function stripExt(name: string): string {
+  const i = name.lastIndexOf('.')
+  return i > 0 ? name.slice(0, i) : name
+}
+
+// ---- 이전/다음 항목 순회(선택 이동 + 포커스) ----
+// 현재 선택(첫 항목) 기준으로 z순서(scene.allIds, 이미 z 정렬) 인덱스를 ±1(wrap)해 선택을 옮기고
+// 그 항목으로 카메라를 포커스한다. 선택이 없으면 첫(prev는 마지막) 항목으로 진입한다.
+function navigateItem(dir: 1 | -1) {
+  const ids = scene.allIds()
+  if (ids.length === 0) return
+  const curId = sel.values()[0]
+  let idx = curId ? ids.indexOf(curId) : -1
+  if (idx < 0) {
+    // 선택이 없거나 목록에 없으면: next는 처음(0), prev는 마지막으로 진입.
+    idx = dir === 1 ? 0 : ids.length - 1
+  } else {
+    idx = (idx + dir + ids.length) % ids.length // 순환(wrap)
+  }
+  const nextId = ids[idx]
+  sel.set([nextId])
+  focusSelected()
+}
+
+// ---- 캔버스 최적화(정돈): 전체 자동 배치 후 전체 보기 ----
+// packAll은 선택이 2개 이상이면 선택만, 아니면 전체를 pack한다. "최적화"는 항상 전체를 정돈하는
+// 의미이므로 선택을 비운 뒤 packAll을 호출해 전체 대상이 되게 한다(packAll 내부에서 fitAll까지 수행).
+function optimizeCanvas() {
+  if (scene.allIds().length < 2) {
+    showToast('정돈할 항목이 2개 이상이어야 합니다', true)
+    return
+  }
+  sel.clear()
+  packAll() // 전체 pack + fitAll(내부에서 호출)
+  showToast('캔버스를 정돈했습니다', true)
+}
+
+// ---- 기준별 격자 정렬(이름/추가순/레이어순/무작위) ----
+// 같은 키를 연속 실행하면 오름/내림(reverse)을 토글한다. 무작위는 매 실행 새 시드로 다시 섞는다.
+// 대상: 선택 2개 이상이면 선택, 아니면 전체(이미지·노트·드로잉 모두 — 표시 크기로 배치).
+let lastSortKey: SortKey | null = null
+let lastSortReverse = false
+function doArrangeSort(key: SortKey) {
+  const targetIds = sel.size > 1 ? sel.values() : scene.allIds()
+  if (targetIds.length < 2) {
+    showToast('정렬할 항목이 2개 이상이어야 합니다', true)
+    return
+  }
+  // 같은 키 연속 실행 → reverse 토글. 다른 키면 오름차순부터 시작.
+  if (key === lastSortKey && key !== 'random') {
+    lastSortReverse = !lastSortReverse
+  } else {
+    lastSortReverse = false
+  }
+  lastSortKey = key
+  // SortItem 매핑: 표시 크기(natural × scale)와 정렬 키 필드(name/addedAt/z).
+  const items: SortItem[] = []
+  for (const id of targetIds) {
+    const im = board.items.find((i) => i.id === id)
+    if (!im) continue
+    const ds = itemDisplaySize(im) // 이미지=크롭 반영, 노트/드로잉=natural
+    items.push({
+      id,
+      name: isImageItem(im) ? im.name : undefined,
+      addedAt: isImageItem(im) ? im.addedAt : undefined,
+      z: im.z,
+      w: ds.w * im.transform.scale,
+      h: ds.h * im.transform.scale,
+    })
+  }
+  if (items.length < 2) return
+  const aspect = Math.max(0.1, host.clientWidth / host.clientHeight)
+  const pos = arrangeGrid(items, key, {
+    aspect,
+    padding: 16,
+    reverse: lastSortReverse,
+    seed: key === 'random' ? Date.now() : undefined, // 무작위는 매번 새 시드
+  })
+  commit()
+  // 반환 중심좌표(원점 기준)를 화면 중앙으로 평행이동해 적용(packAll과 동일 방식).
+  const center = scene.screenToWorld(host.clientWidth / 2, host.clientHeight / 2)
+  for (const id of targetIds) {
+    const im = board.items.find((i) => i.id === id)
+    const p = pos.get(id)
+    if (!im || !p) continue
+    im.transform.x = center.x + p.x
+    im.transform.y = center.y + p.y
+    syncNode(im)
+  }
+  fitAll()
+  const KEY_LABEL: Record<SortKey, string> = { name: '이름순', added: '추가순', order: '레이어순', random: '무작위' }
+  showToast(`격자 정렬: ${KEY_LABEL[key]}${key !== 'random' && lastSortReverse ? ' (역순)' : ''}`, true)
+}
+
+// ---- 최근 파일 피커 열기 ----
+// 마지막 세션 복원 + 최근 목록을 모달로 보여준다. 복원/비우기는 콜백으로 main이 처리.
+function openRecentFiles() {
+  openRecentPicker({
+    entries: getRecent(),
+    hasLastSession: getLastSession() != null,
+    onRestoreLast: () => {
+      const s = getLastSession()
+      if (s) {
+        history.push(board)
+        void restore(s)
+        setDirty(true)
+        showToast('마지막 세션을 복원했습니다', true)
+      }
+    },
+    onClear: clearRecent,
+  })
+}
+
 // ---- 키맵 + 테마 배선 ----
 // 데스크탑 전용 윈도우 모드 액션(웹에선 no-op + 안내 토스트). 기본 액션 뒤에 합쳐 등록.
 const WINDOW_ACTIONS: Action[] = [
@@ -1644,6 +1835,8 @@ const TOOL_ACTIONS: Action[] = [
   { id: 'tool.ellipse', label: '타원 도구', group: '도구', defaultCombo: 'O' },
   { id: 'tool.arrow', label: '화살표 도구', group: '도구', defaultCombo: 'A' },
   { id: 'tool.eraser', label: '드로잉 지우개', group: '도구', defaultCombo: 'E' },
+  // 스포이드(색 추출) 도구. S는 미사용 단일키(입력 포커스 시 keydown early-return이라 안전).
+  { id: 'tool.eyedropper', label: '스포이드(색 추출)', group: '도구', defaultCombo: 'S' },
   { id: 'comment.edit', label: '이미지 댓글', group: '도구', defaultCombo: 'Alt+C' },
 ]
 // 단축키 액션 카탈로그 등록(저장된 사용자 재바인딩도 이때 함께 로드된다).
@@ -1762,6 +1955,9 @@ function runAction(id: string) {
       drawGridIfOn()
       showToast(gridOn ? '그리드 켜짐' : '그리드 꺼짐', true)
       break
+    case 'view.optimize': optimizeCanvas(); break
+    case 'navigate.prev': navigateItem(-1); break
+    case 'navigate.next': navigateItem(1); break
     // 편집
     case 'edit.selectAll': sel.set(scene.allIds()); break
     case 'edit.escape':
@@ -1790,6 +1986,16 @@ function runAction(id: string) {
     case 'arrange.alignBottom': doAlign('bottom'); break
     case 'arrange.distributeH': doDistribute('h'); break
     case 'arrange.distributeV': doDistribute('v'); break
+    case 'arrange.alignHCenter': doAlign('hcenter'); break
+    case 'arrange.alignVCenter': doAlign('vcenter'); break
+    case 'arrange.normWidth': doNormalize('width'); break
+    case 'arrange.normHeight': doNormalize('height'); break
+    case 'arrange.normScale': doNormalize('scale'); break
+    case 'arrange.normArea': doNormalize('area'); break
+    case 'arrange.sortName': doArrangeSort('name'); break
+    case 'arrange.sortAdded': doArrangeSort('added'); break
+    case 'arrange.sortOrder': doArrangeSort('order'); break
+    case 'arrange.sortRandom': doArrangeSort('random'); break
     case 'arrange.bringForward': applyZOrder(bringForward); break
     case 'arrange.bringToFront': applyZOrder(bringToFront); break
     case 'arrange.sendBackward': applyZOrder(sendBackward); break
@@ -1809,6 +2015,7 @@ function runAction(id: string) {
     case 'tool.ellipse': setActiveTool('ellipse'); break
     case 'tool.arrow': setActiveTool('arrow'); break
     case 'tool.eraser': setActiveTool('eraser'); break
+    case 'tool.eyedropper': setActiveTool('eyedropper'); break
     // 댓글(선택 이미지에 메모)
     case 'comment.edit': editComment(); break
     // 파일
@@ -1817,6 +2024,9 @@ function runAction(id: string) {
     case 'file.open': void openBoard(); break
     case 'file.exportScene': void exportScene(); break
     case 'file.exportSelection': void exportSel(); break
+    case 'file.exportEachAll': void exportEachItems('all'); break
+    case 'file.exportEachSel': void exportEachItems('sel'); break
+    case 'file.recentOpen': openRecentFiles(); break
     // 앱
     case 'app.commandPalette': openCommandPalette(); break
     // 창(데스크탑 전용)
@@ -1868,7 +2078,8 @@ window.addEventListener('keydown', (e) => {
 // ---- 가져오기 공통 ----
 async function importFiles(files: File[], baseX: number, baseY: number) {
   if (files.length === 0) return
-  const valid: { url: string; size: { w: number; h: number } }[] = []
+  // 원본 파일명(name)도 함께 보관 — 정렬(격자 이름순)·개별 내보내기 파일명에 쓰인다.
+  const valid: { url: string; size: { w: number; h: number }; name: string }[] = []
   let failed = 0
   for (let i = 0; i < files.length; i++) {
     showLoading(files.length > 1 ? `이미지 불러오는 중… ${i + 1}/${files.length}` : '이미지 불러오는 중…')
@@ -1879,7 +2090,7 @@ async function importFiles(files: File[], baseX: number, baseY: number) {
       const ds = await downscaleIfLarge(url, { maxEdge: 4096 })
       // 치수를 끝내 못 구한 0×0 결과는 배치하지 않는다(렌더/바운즈/pack 깨짐 방지 — bug-io P1).
       if (ds.width <= 0 || ds.height <= 0) throw new Error('이미지 크기를 확인할 수 없습니다')
-      valid.push({ url: ds.dataUrl, size: { w: ds.width, h: ds.height } })
+      valid.push({ url: ds.dataUrl, size: { w: ds.width, h: ds.height }, name: files[i].name })
     } catch {
       failed++
     }
@@ -1888,7 +2099,7 @@ async function importFiles(files: File[], baseX: number, baseY: number) {
     commit()
     for (let j = 0; j < valid.length; j++) {
       if (valid.length > 1) showLoading(`배치 중… ${j + 1}/${valid.length}`)
-      await placeImageWithSize(valid[j].url, valid[j].size, baseX + j * 30, baseY + j * 30)
+      await placeImageWithSize(valid[j].url, valid[j].size, baseX + j * 30, baseY + j * 30, valid[j].name)
     }
     updateMinimap()
   }
@@ -1921,7 +2132,13 @@ window.addEventListener('paste', async (e) => {
   await importFiles(files, center.x, center.y)
 })
 
-async function placeImageWithSize(dataUrl: string, size: { w: number; h: number }, x: number, y: number) {
+async function placeImageWithSize(
+  dataUrl: string,
+  size: { w: number; h: number },
+  x: number,
+  y: number,
+  name?: string,
+) {
   const img: BoardImage = {
     id: genId(),
     type: 'image',
@@ -1931,6 +2148,9 @@ async function placeImageWithSize(dataUrl: string, size: { w: number; h: number 
     opacity: 1,
     locked: false,
     z: board.items.length,
+    // 정렬(이름순)·개별 내보내기 파일명용 메타. 가져오기 경로(드롭/붙여넣기/열기/OS드롭) 공통으로 기록.
+    ...(name ? { name } : {}),
+    addedAt: Date.now(),
   }
   board.items.push(img)
   await scene.addImage(img)
@@ -1975,6 +2195,11 @@ function fileToDataURL(file: File): Promise<string> {
   align: doAlign,
   distribute: doDistribute,
   normalize: doNormalize,
+  arrangeSort: doArrangeSort, // 격자 정렬(name/added/order/random)
+  optimize: optimizeCanvas, // 전체 정돈(pack+fit)
+  navigate: navigateItem, // 이전/다음 순회(±1)
+  exportEach: exportEachItems, // 개별 내보내기('all'|'sel')
+  recentOpen: openRecentFiles, // 최근 파일 피커
   toggleSnap: () => ((snapOn = !snapOn), snapOn),
   toggleMinimap: () => (minimap.toggle(), updateMinimap()),
   undo: doUndo,

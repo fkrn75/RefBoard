@@ -145,14 +145,16 @@ export function distribute(items: AlignItem[], axis: 'h' | 'v'): Map<string, Del
 //   width  = 모든 항목의 폭(natural.w * scale)을 동일하게
 //   height = 모든 항목의 높이(natural.h * scale)를 동일하게
 //   scale  = 모든 항목의 배율(scale) 자체를 동일하게
+//   area   = 모든 항목의 화면 면적((natural.w*scale)*(natural.h*scale))을 동일하게
 // 기준값 선택: 일관성을 위해 "첫 항목(items[0])"을 기준으로 삼는다.
 //   (평균이 아닌 첫 항목 기준 — 사용자가 기준으로 삼고 싶은 항목을 먼저 선택/지정하는 UX 전제)
 // - 폭/높이 통일은 균등 배율만 바꾸므로, 목표 길이를 각 항목의 natural로 나눠 새 scale을 구한다.
+// - 면적 통일은 가로·세로 비율을 유지한 채 면적만 맞추므로, 면적비의 제곱근으로 배율을 보정한다.
 // - natural 값이 0/음수/비유한이면 0 나눗셈을 피하기 위해 그 항목은 기존 scale 유지(방어).
 // - 2개 미만이면 통일 대상이 없으므로 빈 Map 반환.
 export function normalizeSize(
   items: AlignItem[],
-  mode: 'width' | 'height' | 'scale',
+  mode: 'width' | 'height' | 'scale' | 'area',
 ): Map<string, { scale: number }> {
   const result = new Map<string, { scale: number }>()
   if (items.length < 2) return result
@@ -162,6 +164,22 @@ export function normalizeSize(
   if (mode === 'scale') {
     // 배율 자체를 기준 항목의 scale로 통일.
     for (const it of items) result.set(it.id, { scale: ref.scale })
+    return result
+  }
+
+  if (mode === 'area') {
+    // 면적 통일: 기준 항목의 현재 화면 면적을 목표로, 각 항목은 비율 유지한 채 면적만 맞춘다.
+    //   newScale = curScale * sqrt(targetArea / curArea)
+    // 기준 항목의 화면 면적(원본 가로*세로 * 배율²).
+    const targetArea = ref.natural.w * ref.natural.h * ref.scale * ref.scale
+    for (const it of items) {
+      // 이 항목의 현재 화면 면적.
+      const curArea = it.natural.w * it.natural.h * it.scale * it.scale
+      // 면적/배율이 유효하지 않으면 0 나눗셈/NaN을 피하기 위해 기존 배율을 유지(방어).
+      const newScale =
+        curArea > 0 && targetArea > 0 ? it.scale * Math.sqrt(targetArea / curArea) : it.scale
+      result.set(it.id, { scale: newScale })
+    }
     return result
   }
 

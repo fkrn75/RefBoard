@@ -295,6 +295,12 @@ export const DEFAULT_ACTIONS: Action[] = [
   { id: 'view.toggleMinimap', label: '미니맵 토글', group: '보기', defaultCombo: 'M' },
   { id: 'view.toggleSnap', label: '스냅 토글', group: '보기', defaultCombo: 'N' },
   { id: 'view.toggleGrid', label: '그리드 토글', group: '보기', defaultCombo: 'G' },
+  // 캔버스 최적화: 전체 자동 배치(pack) 후 전체 보기로 한 번에 정돈.
+  // Ctrl+O(열기)가 점유 → Ctrl+Shift+O는 창 불투명도 점유 → 충돌 회피로 Ctrl+Alt+P 사용.
+  { id: 'view.optimize', label: '캔버스 최적화(정돈)', group: '보기', defaultCombo: 'Ctrl+Alt+P' },
+  // 이전/다음 항목 순회(선택 이동 + 포커스). 수식 없는 방향키 — 입력 필드 포커스 시엔 keydown이 무시되어 안전.
+  { id: 'navigate.prev', label: '이전 항목', group: '보기', defaultCombo: 'Left' },
+  { id: 'navigate.next', label: '다음 항목', group: '보기', defaultCombo: 'Right' },
 
   // 편집(Edit)
   { id: 'edit.selectAll', label: '전체 선택', group: '편집', defaultCombo: 'Ctrl+A' },
@@ -315,6 +321,20 @@ export const DEFAULT_ACTIONS: Action[] = [
   { id: 'arrange.alignBottom', label: '아래 정렬', group: '정렬', defaultCombo: 'Ctrl+Down' },
   { id: 'arrange.distributeH', label: '수평 균등 분배', group: '정렬', defaultCombo: 'Ctrl+Shift+Left' },
   { id: 'arrange.distributeV', label: '수직 균등 분배', group: '정렬', defaultCombo: 'Ctrl+Shift+Up' },
+  // 중앙 정렬(가로/세로) — 스펙에 기본 콤보가 없어 비움(커맨드 팔레트 + 툴바로만 노출).
+  { id: 'arrange.alignHCenter', label: '가로 중앙 정렬', group: '정렬', defaultCombo: '' },
+  { id: 'arrange.alignVCenter', label: '세로 중앙 정렬', group: '정렬', defaultCombo: '' },
+  // 크기 정규화(폭/높이/배율/면적) — 기준=첫 선택 항목. Ctrl+Alt+방향키(기존 Ctrl+Alt+T만 점유 → 무충돌).
+  { id: 'arrange.normWidth', label: '폭 통일', group: '정렬', defaultCombo: 'Ctrl+Alt+Up' },
+  { id: 'arrange.normHeight', label: '높이 통일', group: '정렬', defaultCombo: 'Ctrl+Alt+Right' },
+  { id: 'arrange.normScale', label: '배율 통일', group: '정렬', defaultCombo: 'Ctrl+Alt+Left' },
+  { id: 'arrange.normArea', label: '면적 통일', group: '정렬', defaultCombo: 'Ctrl+Alt+Down' },
+  // 기준별 격자 정렬(이름/추가순/레이어순/무작위). 같은 키 연속 실행 시 오름/내림 토글.
+  // Ctrl+Alt+문자(기존 Ctrl+Alt+T만 점유 → 무충돌).
+  { id: 'arrange.sortName', label: '격자: 이름순', group: '정렬', defaultCombo: 'Ctrl+Alt+N' },
+  { id: 'arrange.sortAdded', label: '격자: 추가순', group: '정렬', defaultCombo: 'Ctrl+Alt+A' },
+  { id: 'arrange.sortOrder', label: '격자: 레이어순', group: '정렬', defaultCombo: 'Ctrl+Alt+O' },
+  { id: 'arrange.sortRandom', label: '격자: 무작위', group: '정렬', defaultCombo: 'Ctrl+Alt+R' },
   { id: 'arrange.bringForward', label: '앞으로', group: '정렬', defaultCombo: ']' },
   { id: 'arrange.bringToFront', label: '맨 앞으로', group: '정렬', defaultCombo: 'Shift+]' },
   { id: 'arrange.sendBackward', label: '뒤로', group: '정렬', defaultCombo: '[' },
@@ -333,6 +353,12 @@ export const DEFAULT_ACTIONS: Action[] = [
   { id: 'file.open', label: '열기', group: '파일', defaultCombo: 'Ctrl+O' },
   { id: 'file.exportScene', label: '씬 내보내기(PNG)', group: '파일', defaultCombo: 'Ctrl+E' },
   { id: 'file.exportSelection', label: '선택 내보내기(PNG)', group: '파일', defaultCombo: 'Ctrl+Shift+E' },
+  // 개별 내보내기: 아이템마다 파일 1장씩. 전체=Ctrl+Alt+I(Ctrl+Shift+I는 DevTools라 금지),
+  // 선택만=콤보 비움(커맨드 팔레트로만). 파일명=원본 name(없으면 id)+순번.
+  { id: 'file.exportEachAll', label: '개별 내보내기 · 전체', group: '파일', defaultCombo: 'Ctrl+Alt+I' },
+  { id: 'file.exportEachSel', label: '개별 내보내기 · 선택', group: '파일', defaultCombo: '' },
+  // 최근 파일 열기(피커). Ctrl+Shift+L은 캔버스 잠금 점유 → Ctrl+Alt+L 사용(Alt+L은 잠금 토글이라 구분됨).
+  { id: 'file.recentOpen', label: '최근 파일 열기', group: '파일', defaultCombo: 'Ctrl+Alt+L' },
 
   // 커맨드 팔레트(자기 자신) — command-palette.ts가 여는 키
   { id: 'app.commandPalette', label: '커맨드 팔레트', group: '앱', defaultCombo: 'Ctrl+Shift+P' },

@@ -114,6 +114,15 @@ const ICONS = {
   // 댓글(말풍선)
   comment:
     SVG_HEAD + '<path d="M4 5h16v11H9l-4 4V5z"/></svg>',
+  // 스포이드(색 추출 — 점적기)
+  eyedropper:
+    SVG_HEAD + '<path d="M18 3l3 3-9 9H9v-3z"/><path d="M9 12l-4 4a2 2 0 0 0 3 3l4-4"/></svg>',
+  // 개별 내보내기(여러 장 분리 — 겹친 사각형 + 내보내기 화살표)
+  exportEach:
+    SVG_HEAD + '<rect x="3" y="7" width="12" height="12" rx="1.5"/><path d="M8 7V4a1 1 0 0 1 1-1h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-3"/></svg>',
+  // 최근 파일(시계 화살표 — history)
+  recent:
+    SVG_HEAD + '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 4v4h4"/><path d="M12 8v4l3 2"/></svg>',
 } as const
 
 // ---- 기본 버튼 카탈로그 ----
@@ -128,6 +137,8 @@ const DEFAULT_BUTTONS: ToolbarButton[] = [
   { actionId: 'file.save', title: '보드 저장 (Ctrl+S)', icon: ICONS.save, group: 'file' },
   { actionId: 'file.import', title: '이미지 가져오기 (Ctrl+I)', icon: ICONS.image, group: 'file' },
   { actionId: 'file.exportScene', title: '내보내기 (Ctrl+E)', icon: ICONS.export, group: 'file' },
+  { actionId: 'file.exportEachAll', title: '개별 내보내기 · 전체 (Ctrl+Alt+I)', icon: ICONS.exportEach, group: 'file' },
+  { actionId: 'file.recentOpen', title: '최근 파일 (Ctrl+Alt+L)', icon: ICONS.recent, group: 'file' },
   { actionId: 'share.webLink', title: '웹 뷰어 링크 공유 (Ctrl+Shift+S)', icon: ICONS.share, group: 'file' },
   // 도구 그룹 — 클릭하면 activeTool을 바꾼다(main.ts runAction에서 set). 활성 도구는 rb-active로 강조.
   { actionId: 'tool.select', title: '선택 도구 (V)', icon: ICONS.cursor, group: 'tools' },
@@ -138,6 +149,7 @@ const DEFAULT_BUTTONS: ToolbarButton[] = [
   { actionId: 'tool.ellipse', title: '타원 (O)', icon: ICONS.ellipse, group: 'tools' },
   { actionId: 'tool.arrow', title: '화살표 (A)', icon: ICONS.arrow, group: 'tools' },
   { actionId: 'tool.eraser', title: '드로잉 지우개 (E)', icon: ICONS.eraser, group: 'tools' },
+  { actionId: 'tool.eyedropper', title: '스포이드 · 색 추출 (S)', icon: ICONS.eyedropper, group: 'tools' },
   { actionId: 'comment.edit', title: '선택 이미지에 댓글 (Alt+C)', icon: ICONS.comment, group: 'tools' },
   // 앱/뷰 그룹
   { actionId: 'app.toggleTheme', title: '테마 전환', icon: ICONS.theme, group: 'app' },
