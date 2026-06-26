@@ -1962,7 +1962,57 @@ async function shareWebLink() {
 // 내 공유 보드 관리 패널을 연다(목록·공개전환·삭제·링크복사). 데이터/삭제/전환은 어댑터에 위임.
 function openBoardManagerPanel(): void {
   const adapter = getShareAdapter(location.origin + '/viewer.html')
-  openBoardManager({ adapter, onToast: showToast })
+  openBoardManager({
+    adapter,
+    onToast: showToast,
+    // 클라우드 공유본을 편집 앱으로 불러온다(load → 원격 이미지 인라인 → restore).
+    onLoadIntoEditor: async (id) => {
+      if (dirty && !confirm('저장하지 않은 변경이 있습니다.\n불러오면 현재 보드가 대체됩니다. 계속할까요?')) return
+      showToast('불러오는 중…', true)
+      const res = await adapter.load(id)
+      if (!res.ok) {
+        showToast('불러오기 실패: ' + res.reason, true)
+        return
+      }
+      // 뷰어용 서명 URL(원격)을 data URL로 임베드 → 편집 앱은 항상 로컬 임베드 보드만 다룬다(재공유도 정상).
+      await inlineRemoteImages(res.board)
+      await restore(res.board)
+      board.board.shareId = id // 이 클라우드 보드에서 왔으니 재공유 시 같은 링크를 갱신.
+      void autosave.saveNow()
+      setDirty(false) // 방금 클라우드 상태와 동일하므로 깨끗한 상태로 시작.
+      refreshBoardStatus()
+      showToast('편집 앱으로 불러왔어요', true)
+    },
+  })
+}
+
+// 원격(서명 URL) 이미지를 data URL로 변환해 보드에 임베드한다. 같은 URL은 한 번만 받는다(orig=medium 중복 방지).
+async function inlineRemoteImages(state: BoardState): Promise<void> {
+  const cache = new Map<string, string>()
+  const conv = async (u: string): Promise<string> => {
+    if (!u || !/^https?:/i.test(u)) return u // 이미 data URL이거나 빈 값이면 그대로 둔다.
+    const hit = cache.get(u)
+    if (hit) return hit
+    const resp = await fetch(u)
+    const blob = await resp.blob()
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const fr = new FileReader()
+      fr.onload = () => resolve(fr.result as string)
+      fr.onerror = () => reject(fr.error)
+      fr.readAsDataURL(blob)
+    })
+    cache.set(u, dataUrl)
+    return dataUrl
+  }
+  for (const it of state.items) {
+    if (!isImageItem(it)) continue
+    if (it.srcs) {
+      it.srcs.thumb = await conv(it.srcs.thumb)
+      it.srcs.medium = await conv(it.srcs.medium)
+      it.srcs.orig = await conv(it.srcs.orig)
+    }
+    if (it.src) it.src = await conv(it.src)
+  }
 }
 
 // 테마 변경 시 캔버스 배경 + 그리드 + 선택 외곽선을 새 색으로 다시 그린다.

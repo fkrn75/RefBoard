@@ -11,6 +11,8 @@ export interface BoardManagerOptions {
   adapter: ShareAdapter
   // 토스트는 main.ts 소유라 콜백으로 받는다(이 모듈은 DOM만 담당).
   onToast?: (msg: string, ok?: boolean) => void
+  // 편집 앱으로 불러오기(클라우드 보드 → 편집). main이 load+restore를 담당. 미지정이면 버튼 숨김.
+  onLoadIntoEditor?: (id: string) => void | Promise<void>
 }
 
 export function openBoardManager(options: BoardManagerOptions): void {
@@ -175,6 +177,12 @@ export function openBoardManager(options: BoardManagerOptions): void {
     meta.style.cssText = 'font-size:11px;color:var(--rb-text-dim, #888)'
     info.append(name, meta)
 
+    // 뷰어로 바로 열기(새 탭).
+    const openBtn = makeIconButton('👁', '뷰어로 열기')
+    openBtn.addEventListener('click', () => {
+      window.open(adapter.getShareUrl(b.id), '_blank', 'noopener')
+    })
+
     const copyBtn = makeIconButton('🔗', '링크 복사')
     copyBtn.addEventListener('click', async () => {
       const url = adapter.getShareUrl(b.id)
@@ -215,7 +223,27 @@ export function openBoardManager(options: BoardManagerOptions): void {
       }
     })
 
-    row.append(badge, info, copyBtn, pubBtn, delBtn)
+    // 편집 앱으로 불러오기(클라우드 → 편집). 콜백이 있을 때만 노출.
+    let loadBtn: HTMLButtonElement | null = null
+    if (options.onLoadIntoEditor) {
+      loadBtn = makeIconButton('✏️', '편집 앱으로 불러오기')
+      const b2 = loadBtn
+      b2.addEventListener('click', async () => {
+        b2.disabled = true
+        try {
+          await options.onLoadIntoEditor!(b.id)
+          close() // 불러온 뒤 패널을 닫아 편집 화면으로 돌아간다.
+        } catch (e) {
+          toast(errMsg(e), false)
+          b2.disabled = false
+        }
+      })
+    }
+
+    const actions: HTMLElement[] = [openBtn, copyBtn]
+    if (loadBtn) actions.push(loadBtn)
+    actions.push(pubBtn, delBtn)
+    row.append(badge, info, ...actions)
     return row
   }
 
