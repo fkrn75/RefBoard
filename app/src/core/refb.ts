@@ -106,15 +106,62 @@ function encodeDataUrl(bytes: Uint8Array, mime: string): string {
   return `data:${mime};base64,${btoa(binary)}`
 }
 
-// 원격 URL을 fetch해 { mime, bytes }로 가져온다(원격 이미지 임베드용).
+// 🔴 손상 방어의 핵심: 바이트가 실제 이미지인지 매직바이트(파일 시그니처)로 판별한다.
+// content-type 헤더는 못 믿는다 — Cloudflare Pages SPA fallback이 index.html(HTML)을 돌려주거나
+// 서버가 image/png로 거짓 라벨링해도, 바이트 시그니처는 속일 수 없다. 래스터(PNG/JPEG/GIF/WebP/BMP)와
+// SVG(텍스트 '<?xml'/'<svg')는 허용하고, HTML('<!doctype'/'<html' 등)·일반 텍스트는 거부한다.
+function looksLikeImageBytes(b: Uint8Array): boolean {
+  if (!b || b.length < 4) return false
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return true // PNG
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return true // JPEG
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return true // 'GIF8'
+  if (b[0] === 0x42 && b[1] === 0x4d) return true // BMP 'BM'
+  // WebP: 'RIFF' .... 'WEBP'
+  if (
+    b.length >= 12 &&
+    b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+    b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50
+  )
+    return true
+  // SVG(텍스트): 선행 공백/BOM 건너뛰고 '<?'(xml) 또는 '<s'/'<S'(svg)면 허용. '<!'(doctype)·'<h'(html)는 거부.
+  let i = 0
+  while (
+    i < b.length &&
+    (b[i] === 0x20 || b[i] === 0x09 || b[i] === 0x0a || b[i] === 0x0d || b[i] === 0xef || b[i] === 0xbb || b[i] === 0xbf)
+  )
+    i++
+  if (b[i] === 0x3c && (b[i + 1] === 0x3f || b[i + 1] === 0x73 || b[i + 1] === 0x53)) return true
+  return false
+}
+
+// 매직바이트로 image mime 추정(이미지가 아니면 null). data URL 헤더 재구성용.
+function sniffImageMime(b: Uint8Array): string | null {
+  if (b.length >= 4 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png'
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg'
+  if (b.length >= 4 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif'
+  if (
+    b.length >= 12 &&
+    b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+    b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50
+  )
+    return 'image/webp'
+  if (b.length >= 2 && b[0] === 0x42 && b[1] === 0x4d) return 'image/bmp'
+  return null
+}
+
+// 원격/상대 URL을 fetch해 { mime, bytes }로 가져온다(원격 이미지 임베드용).
+// 이미지가 아닌 응답(CF SPA fallback HTML 등)은 throw해 비-이미지가 자산으로 굳는 것을 막는다.
 async function fetchRemoteImage(url: string): Promise<DecodedDataUrl> {
   const res = await fetch(url)
   if (!res.ok) throw new Error(`원격 이미지를 가져올 수 없습니다(${res.status}): ${url}`)
-  const buf = await res.arrayBuffer()
-  // 응답 Content-Type에서 mime 추출(없으면 png 폴백).
-  const ct = res.headers.get('content-type') || 'image/png'
-  const mime = ct.split(';')[0].trim() || 'image/png'
-  return { mime, bytes: new Uint8Array(buf) }
+  const ct = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
+  // content-type이 이미지가 아니면(text/html 등) 즉시 거부.
+  if (ct && !ct.startsWith('image/')) throw new Error(`이미지가 아닌 응답(${ct}): ${url}`)
+  const bytes = new Uint8Array(await res.arrayBuffer())
+  // content-type을 속여도(헤더 image/* + 본문 HTML) 매직바이트로 최종 차단.
+  if (!looksLikeImageBytes(bytes)) throw new Error(`이미지 시그니처 불일치(손상/HTML): ${url}`)
+  const mime = ct.startsWith('image/') ? ct : (sniffImageMime(bytes) ?? 'image/png')
+  return { mime, bytes }
 }
 
 // 자산 파일명에서 확장자만 추출(점 뒤). 없으면 빈 문자열.
@@ -146,7 +193,9 @@ export async function packRefb(
   board: BoardState,
   opts?: { mode?: 'embed' | 'link'; thumbnail?: Uint8Array },
 ): Promise<Blob> {
-  const mode = opts?.mode ?? 'embed'
+  // 참고: opts.mode('embed'/'link')는 더 이상 분기에 쓰이지 않는다 — 브라우저는 임의 로컬 경로를
+  // fetch할 수 없어 embed든 link든 data URL/http(s)만 임베드하고 나머지는 경로를 유지하기 때문이다.
+  // (시그니처에는 하위호환으로 남겨 둔다.)
 
   // 원본 board를 변경하지 않기 위해 board.json용 깊은 복사본을 만든다.
   // (structuredClone 우선, 미지원 환경은 JSON 라운드트립 폴백.)
@@ -169,7 +218,7 @@ export async function packRefb(
     let decoded: DecodedDataUrl | null = null
 
     if (isDataUrl(src)) {
-      // data URL → 항상 임베드. base64가 아닌 data URL(SVG 텍스트 등)은 decodeDataUrl이 throw하므로
+      // data URL → 임베드. base64가 아닌 data URL(SVG 텍스트 등)은 decodeDataUrl이 throw하므로
       // try/catch로 감싸 저장 전체가 실패하지 않게 한다(링크 유지로 폴백 — bug-io P2).
       try {
         decoded = decodeDataUrl(src)
@@ -177,27 +226,28 @@ export async function packRefb(
         decoded = null
       }
     } else if (isRemoteUrl(src)) {
-      // 원격 URL → 항상 임베드(네트워크에서 받아옴). 실패 시 링크 유지로 폴백.
+      // 원격 http(s) URL → 임베드 시도(네트워크에서 받아옴). 실패/비이미지면 링크 유지로 폴백.
       try {
         decoded = await fetchRemoteImage(src)
       } catch {
-        decoded = null // 가져오기 실패 → 원격 링크를 그대로 둔다(상대경로 치환 생략).
+        decoded = null
       }
-    } else if (mode === 'embed') {
-      // 그 외(로컬 파일 경로 등) + embed 모드: 임베드를 시도한다. 단 브라우저에서는
-      // 임의 로컬 경로를 fetch할 수 없으므로 대개 실패 → 그때는 경로를 그대로 둔다.
-      try {
-        decoded = await fetchRemoteImage(src)
-      } catch {
-        decoded = null // 읽을 수 없는 로컬 경로 → 링크(경로) 유지.
-      }
-    } else {
-      // link 모드: 로컬 파일 경로는 의도적으로 임베드하지 않고 경로를 유지한다.
+    }
+    // ⚠️ 그 외(빈 문자열·Storage 키·상대경로·로컬 파일경로)는 절대 fetch하지 않는다.
+    // fetch('')나 fetch('키/상대경로')는 브라우저가 origin 기준 상대경로로 해석 → CF Pages SPA
+    // fallback(index.html=HTML)을 받아 비-이미지를 assets/<id>.png로 굳히던 손상의 발원지였다.
+    // 이 경우 src를 그대로 두고, board.json의 srcs(있으면)가 표시를 담당한다.
+
+    // 디코드 결과가 실제 이미지인지 매직바이트로 최종 검증 — 아니면 임베드하지 않는다(손상 자산 방지).
+    if (decoded && !looksLikeImageBytes(decoded.bytes)) {
+      console.warn(`[refb] 임베드 대상이 이미지가 아님 — 건너뜀(item ${item.id}).`)
       decoded = null
     }
 
     if (decoded) {
-      const ext = mimeToExt(decoded.mime)
+      // mime은 매직바이트 우선(헤더 거짓 라벨 방지), 보조로 decoded.mime.
+      const mime = sniffImageMime(decoded.bytes) ?? decoded.mime
+      const ext = mimeToExt(mime)
       const assetPath = `${ASSETS_DIR}${item.id}.${ext}`
       entries[assetPath] = decoded.bytes
       item.src = assetPath // 복사본의 src를 ZIP 내부 상대경로로 치환.
@@ -293,7 +343,17 @@ export async function unpackRefb(blob: Blob): Promise<BoardState> {
       console.warn(`[refb] 자산 누락: ${src} (이미지 src를 복원하지 못했습니다).`)
       continue
     }
-    const mime = extToMime(extOf(src))
+    // 🔴 손상 방어: 자산 바이트가 실제 이미지인지 매직바이트로 검증한다. 확장자(.png)만 믿고
+    // HTML 바이트를 image/png data URL로 둔갑시키던 것이 손상의 발원지였다(CF SPA fallback이
+    // assets/<id>.png로 저장된 경우 등). 비-이미지면 src를 비워(손상 dataURL을 만들지 않음)
+    // 자가 치유한다 — board.json의 srcs(있으면)가 표시를 담당하므로 정상 이미지는 그대로 보인다.
+    if (!looksLikeImageBytes(asset)) {
+      console.warn(`[refb] 자산이 이미지가 아님(손상/HTML): ${src} — src를 비웁니다(srcs로 폴백).`)
+      item.src = ''
+      continue
+    }
+    // mime은 매직바이트 우선(확장자 거짓 가능성 차단), 보조로 확장자.
+    const mime = sniffImageMime(asset) ?? extToMime(extOf(src))
     item.src = encodeDataUrl(asset, mime)
   }
 
