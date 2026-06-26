@@ -14,7 +14,7 @@
 // 정합이 복잡하므로, crop이 있는 이미지와 GIF(정지 축소 시 애니 손실)는 srcset 생성에서
 // 제외한다(→ src 폴백으로 안전).
 
-import { downscaleIfLarge } from './downscale'
+import { downscaleIfLarge, canDecodeImage } from './downscale'
 import type { BoardState, BoardImage, ImageSrcSet } from './board'
 
 export interface SrcSetOptions {
@@ -105,6 +105,31 @@ export async function attachSrcSets(
   // 장끼리는 순차 — 대량 보드에서 동시에 수십 장×3해상도를 인코딩하면 메모리가 폭증한다.
   // (한 장당 buildSrcSet 내부에서 3해상도는 병렬, 장끼리는 순차로 균형.)
   for (const img of targets) {
+    const prev = img.srcs // 기존 srcs(클라우드/.refb에서 불러온 보드면 존재) — 손상 방어용 보존 후보
+
+    // 🔴 손상 방어: src가 실제로 디코드되는 이미지일 때만 srcs를 새로 만든다.
+    // src가 손상 dataURL(예: HTML이 image/png로 위장)이면 buildSrcSet은 graceful 폴백으로
+    // 그 손상 src를 그대로 돌려주고, 그것을 srcs에 넣으면 멀쩡하던 기존 srcs(정상 dataURL)까지
+    // 파괴된다(불러오기→재공유 시 원본 이미지 손실 버그). 디코드 검증으로 이를 차단한다.
+    if (!(await canDecodeImage(img.src))) {
+      if (prev && prev.medium && prev.medium !== img.src && (await canDecodeImage(prev.medium))) {
+        // 불러온 보드 재공유: 기존 정상 srcs를 보존하고 src만 비운다(공유 용량 절감).
+        img.srcs = prev
+        img.src = ''
+        console.warn('[srcset] src 디코드 실패 — 기존 srcs 보존(손상 방어):', img.id)
+      } else {
+        // 복구할 정상본이 없다(src 손상 + 기존 srcs도 없음/손상). 손상 데이터를 Storage로
+        // 올리지 않도록 src·srcs를 비운다 — 이 이미지는 표시되지 않지만(기즈모만 남음)
+        // 다른 정상 이미지를 오염시키지 않는다.
+        img.src = ''
+        delete img.srcs
+        console.warn('[srcset] src 디코드 실패 & 복구본 없음 — 이미지 비움(손상 방어):', img.id)
+      }
+      done++
+      opts.onProgress?.(done, total)
+      continue
+    }
+
     img.srcs = await buildSrcSet(img.src, opts)
     // 원본 data URL 제거 — srcs(thumb/medium/orig)로 대체되어 불필요(P1#4: 잔류 시 공유 저장/전송 용량 2배).
     // srcs가 채워진 이 아이템만 비운다. crop/GIF·구보드는 targets에서 제외돼 src를 유지하므로

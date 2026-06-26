@@ -147,13 +147,34 @@ async function canvasToDataURL(canvas: AnyCanvas, mime: string, quality: number)
   return blobToDataURL(blob)
 }
 
-function blobToDataURL(blob: Blob): Promise<string> {
+export function blobToDataURL(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const r = new FileReader()
     r.onload = () => resolve(r.result as string)
     r.onerror = () => reject(r.error)
     r.readAsDataURL(blob)
   })
+}
+
+/**
+ * src(dataURL/Blob/URL)가 실제로 디코드되는 이미지인지 검증한다(손상 방어).
+ *
+ * content-type만으론 못 거르는 위장 데이터(예: Cloudflare SPA fallback이 index.html을
+ * image/png로 돌려주는 사고)나 깨진 바이트를 걸러내기 위해, 헤더가 아니라 실제 디코드를
+ * 시도한다. 디코드 성공 + 치수>0이면 true, 그 외(디코드 실패·0×0)는 false(throw 안 함).
+ *
+ * 용도: 공유 업로드(attachSrcSets)·클라우드 인라인(inlineRemoteImages)에서 손상 데이터가
+ * srcs에 박혀 Storage를 오염시키는 것을 차단한다.
+ */
+export async function canDecodeImage(src: ImageSource): Promise<boolean> {
+  try {
+    const d = await decodeToBitmap(src)
+    const ok = d.w > 0 && d.h > 0
+    if (d.isBitmap) (d.bitmap as ImageBitmap).close()
+    return ok
+  } catch {
+    return false
+  }
 }
 
 // 입력 src를 그대로 dataURL로 변환(축소 불필요 시 원본 반환용).

@@ -37,7 +37,7 @@ import { openRecentPicker } from './core/recent-picker'
 import { applyTheme, getTheme, onThemeChange } from './core/theme'
 import { registerActions, matchKey, getActions, DEFAULT_ACTIONS, type Action } from './core/keymap'
 import { openPalette, isPaletteOpen } from './core/command-palette'
-import { downscaleIfLarge } from './core/downscale'
+import { downscaleIfLarge, canDecodeImage, blobToDataURL } from './core/downscale'
 import {
   isDesktop,
   saveRefbNative,
@@ -1987,31 +1987,46 @@ function openBoardManagerPanel(): void {
 }
 
 // 원격(서명 URL) 이미지를 data URL로 변환해 보드에 임베드한다. 같은 URL은 한 번만 받는다(orig=medium 중복 방지).
+// 🔴 손상 방어: 실제로 디코드되는 이미지일 때만 채택한다. Cloudflare SPA fallback이 index.html을
+// image/png로 돌려주는 사고처럼 content-type만으론 못 거르는 위장 데이터가 srcs에 박히면,
+// 재공유(attachSrcSets→Storage)에서 다른 정상 이미지까지 오염된다. 디코드 실패 시 변환을 포기하고
+// 기존 값(원격 URL)을 그대로 둔다 → 그 보드를 재공유하면 upload 가드가 명확히 실패시켜 진단 가능.
 async function inlineRemoteImages(state: BoardState): Promise<void> {
-  const cache = new Map<string, string>()
-  const conv = async (u: string): Promise<string> => {
-    if (!u || !/^https?:/i.test(u)) return u // 이미 data URL이거나 빈 값이면 그대로 둔다.
-    const hit = cache.get(u)
-    if (hit) return hit
-    const resp = await fetch(u)
-    const blob = await resp.blob()
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const fr = new FileReader()
-      fr.onload = () => resolve(fr.result as string)
-      fr.onerror = () => reject(fr.error)
-      fr.readAsDataURL(blob)
-    })
-    cache.set(u, dataUrl)
-    return dataUrl
+  const cache = new Map<string, string>() // URL → dataURL('' = 디코드 실패로 변환 포기)
+  const conv = async (u: string): Promise<string | null> => {
+    if (!u || !/^https?:/i.test(u)) return null // 비-URL(이미 dataURL/빈 값)은 변환 대상 아님 → 원본 유지
+    const cached = cache.get(u)
+    if (cached !== undefined) return cached || null
+    let out = ''
+    try {
+      const resp = await fetch(u)
+      if (!resp.ok) {
+        console.warn('[inline] fetch 실패', resp.status, u)
+      } else {
+        const blob = await resp.blob()
+        if (await canDecodeImage(blob)) out = await blobToDataURL(blob)
+        else console.warn('[inline] 이미지가 아님(손상/HTML) — 인라인 건너뜀:', u)
+      }
+    } catch (e) {
+      console.warn('[inline] fetch 예외:', u, e)
+    }
+    cache.set(u, out)
+    return out || null
   }
   for (const it of state.items) {
     if (!isImageItem(it)) continue
     if (it.srcs) {
-      it.srcs.thumb = await conv(it.srcs.thumb)
-      it.srcs.medium = await conv(it.srcs.medium)
-      it.srcs.orig = await conv(it.srcs.orig)
+      const t = await conv(it.srcs.thumb)
+      if (t) it.srcs.thumb = t
+      const m = await conv(it.srcs.medium)
+      if (m) it.srcs.medium = m
+      const o = await conv(it.srcs.orig)
+      if (o) it.srcs.orig = o
     }
-    if (it.src) it.src = await conv(it.src)
+    if (it.src) {
+      const s = await conv(it.src)
+      if (s) it.src = s
+    }
   }
 }
 
