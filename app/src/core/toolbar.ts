@@ -28,6 +28,8 @@ export interface ToolbarStatus {
   cursor?: { x: number; y: number } // 커서의 월드좌표. 없으면 '—' 표시(캔버스 밖 등)
   selCount: number // 선택된 항목 개수
   total: number // 보드의 이미지 총 개수
+  boardName?: string // 현재 보드 이름(상태바 좌측 표시)
+  share?: 'local' | 'public' | 'private' // 공유 상태: 로컬 전용 / 공개 / 비공개
 }
 
 // createToolbar 옵션.
@@ -36,6 +38,7 @@ export interface ToolbarOptions {
   actions?: ToolbarButton[] // 버튼 세트 교체(생략 시 DEFAULT_BUTTONS 사용)
   mount?: HTMLElement // 오버레이를 붙일 부모(생략 시 document.body)
   isDesktop?: boolean // 데스크탑 여부. false면 desktopOnly 버튼을 숨긴다(생략 시 true로 간주해 모두 노출)
+  onRenameBoard?: () => void // 상태바 보드 이름 클릭 시 호출(이름 변경 트리거). 미지정이면 클릭 비활성.
 }
 
 // createToolbar가 돌려주는 핸들. 상태 갱신과 정리(destroy)를 제공한다.
@@ -123,6 +126,9 @@ const ICONS = {
   // 최근 파일(시계 화살표 — history)
   recent:
     SVG_HEAD + '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 4v4h4"/><path d="M12 8v4l3 2"/></svg>',
+  // 내 공유 보드 관리(목록 — 항목 줄들)
+  manage:
+    SVG_HEAD + '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>',
 } as const
 
 // ---- 기본 버튼 카탈로그 ----
@@ -140,6 +146,7 @@ const DEFAULT_BUTTONS: ToolbarButton[] = [
   { actionId: 'file.exportEachAll', title: '개별 내보내기 · 전체 (Ctrl+Alt+I)', icon: ICONS.exportEach, group: 'file' },
   { actionId: 'file.recentOpen', title: '최근 파일 (Ctrl+Alt+L)', icon: ICONS.recent, group: 'file' },
   { actionId: 'share.webLink', title: '웹 뷰어 링크 공유 (Ctrl+Shift+S)', icon: ICONS.share, group: 'file' },
+  { actionId: 'share.manage', title: '내 공유 보드 관리', icon: ICONS.manage, group: 'file' },
   // 도구 그룹 — 클릭하면 activeTool을 바꾼다(main.ts runAction에서 set). 활성 도구는 rb-active로 강조.
   { actionId: 'tool.select', title: '선택 도구 (V)', icon: ICONS.cursor, group: 'tools' },
   { actionId: 'tool.text', title: '텍스트 (T)', icon: ICONS.text, group: 'tools' },
@@ -213,6 +220,19 @@ const STYLE_TEXT = `
 .rb-stat { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .rb-stat b { color: var(--rb-text, #e6e6e6); font-weight: 600; }
 .rb-stat-label { opacity: .8; }
+/* 보드 이름(클릭해 변경) + 공유 배지 */
+.rb-board-name {
+  font: inherit; color: var(--rb-text, #e6e6e6); font-weight: 600;
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  padding: 2px 8px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  cursor: pointer;
+}
+.rb-board-name:hover:not(:disabled) { background: color-mix(in srgb, var(--rb-text, #e6e6e6) 12%, transparent); }
+.rb-board-name:disabled { cursor: default; }
+.rb-share-badge { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
+.rb-share-badge[data-share="public"]  { color: #46c98a; border-color: #1f7a4d; background: rgba(31,122,77,.15); }
+.rb-share-badge[data-share="private"] { color: #e0a33e; border-color: #7a5a1f; background: rgba(224,163,62,.12); }
+.rb-share-badge[data-share="local"]   { color: #999;    border-color: #555;    background: rgba(136,136,136,.12); }
 `
 
 // 스타일 1회 주입(중복 방지).
@@ -313,6 +333,21 @@ export function createToolbar(opts: ToolbarOptions): ToolbarHandle {
   const selStat = makeStat('선택')
   const totalStat = makeStat('이미지')
 
+  // 보드 이름(클릭해 변경) + 공유 배지 — 상태바 맨 왼쪽.
+  const boardNameEl = doc.createElement('button')
+  boardNameEl.className = 'rb-board-name'
+  boardNameEl.type = 'button'
+  if (opts.onRenameBoard) {
+    boardNameEl.title = '클릭해 보드 이름 변경'
+    boardNameEl.addEventListener('click', () => opts.onRenameBoard?.())
+  } else {
+    boardNameEl.disabled = true
+  }
+  const shareBadge = doc.createElement('span')
+  shareBadge.className = 'rb-share-badge'
+
+  statusbar.appendChild(boardNameEl)
+  statusbar.appendChild(shareBadge)
   statusbar.appendChild(zoomStat.wrap)
   const spacer = doc.createElement('div')
   spacer.className = 'rb-spacer'
@@ -326,10 +361,14 @@ export function createToolbar(opts: ToolbarOptions): ToolbarHandle {
   root.appendChild(layer)
 
   // 직전 상태를 보관해 부분 갱신(생략 필드 유지)을 지원한다.
-  const state: ToolbarStatus = { zoom: 1, selCount: 0, total: 0 }
+  const state: ToolbarStatus = { zoom: 1, selCount: 0, total: 0, boardName: '', share: 'local' }
 
   // 보관 상태를 DOM에 반영.
   function render(): void {
+    boardNameEl.textContent = state.boardName || '제목 없음'
+    const sh = state.share ?? 'local'
+    shareBadge.textContent = sh === 'public' ? '공개' : sh === 'private' ? '비공개' : '로컬'
+    shareBadge.dataset.share = sh
     zoomStat.val.textContent = fmtZoom(state.zoom)
     cursorStat.val.textContent = state.cursor
       ? `${fmtCoord(state.cursor.x)}, ${fmtCoord(state.cursor.y)}`
@@ -345,6 +384,8 @@ export function createToolbar(opts: ToolbarOptions): ToolbarHandle {
       if (typeof s.zoom === 'number') state.zoom = s.zoom
       if (typeof s.selCount === 'number') state.selCount = s.selCount
       if (typeof s.total === 'number') state.total = s.total
+      if (typeof s.boardName === 'string') state.boardName = s.boardName
+      if (s.share) state.share = s.share
       // cursor는 명시적으로 키가 들어왔을 때만 갱신(undefined를 넘기면 '캔버스 밖'으로 해석해 지움).
       if ('cursor' in s) state.cursor = s.cursor
       render()

@@ -26,12 +26,25 @@ export interface UploadOptions {
   isPublic?: boolean
   expiresAt?: Date
   onProgress?: (done: number, total: number) => void
+  // 재공유 시 기존 board_id를 넘기면 새로 만들지 않고 그 보드를 갱신한다(중복 누적 방지).
+  // 그 id가 더 이상 없거나 내 소유가 아니면 어댑터가 새 보드로 자동 폴백한다.
+  reuseId?: string
 }
 
 // 로드 결과 — 성공이면 보드, 실패면 사유(뷰어가 화면 분기). null 대신 사유를 담는다.
 export type LoadResult =
   | { ok: true; board: BoardState }
   | { ok: false; reason: 'auth-required' | 'forbidden' | 'expired' | 'not-found' }
+
+// 내 보드 목록 항목(관리 패널용). data(이미지)는 제외한 메타만 담는다.
+export interface BoardSummary {
+  id: string
+  title: string
+  isPublic: boolean
+  status: 'uploading' | 'ready'
+  createdAt?: string // ISO. 백엔드에 있으면 표시(목업은 없음).
+  updatedAt?: string
+}
 
 export interface ShareAdapter {
   // 보드를 업로드하고 식별자와 공유 URL을 돌려준다.
@@ -49,6 +62,14 @@ export interface ShareAdapter {
 
   // ---- 허용목록(작성자용) ----
   setAllowlist(id: string, emails: string[]): Promise<void>
+
+  // ---- 내 보드 관리(작성자용) ----
+  // 내가 올린 보드 목록(최신순). 미로그인 처리는 상위 UI가 담당한다.
+  listMine(): Promise<BoardSummary[]>
+  // 보드 삭제(메타 + 이미지). 내 소유만 가능(RLS).
+  remove(id: string): Promise<void>
+  // 공개/비공개 전환.
+  setPublic(id: string, isPublic: boolean): Promise<void>
 }
 
 // LocalShareAdapter가 localStorage에 쓰는 키 접두사. 한 항목 = 한 보드의 직렬화 JSON.
@@ -98,7 +119,7 @@ export class LocalShareAdapter implements ShareAdapter {
   async upload(board: BoardState, opts?: UploadOptions): Promise<{ id: string; url: string }> {
     // 목업은 옵션(허용목록/공개/만료)을 무시한다 — 로컬은 항상 본인만 열람.
     // 짧은 식별자 생성(board.ts genId 재사용 — 포맷 일관성). 충돌 가능성은 무시 가능 수준.
-    const id = genId()
+    const id = opts?.reuseId ?? genId() // 재공유면 같은 키에 덮어써 중복을 막는다(목업도 동작 일관).
     const s = this.store()
     if (!s) {
       throw new Error('이 환경에서는 localStorage를 사용할 수 없어 로컬 공유를 저장하지 못했습니다.')
@@ -146,6 +167,34 @@ export class LocalShareAdapter implements ShareAdapter {
   }
   async setAllowlist(_id: string, _emails: string[]): Promise<void> {
     /* 목업: 허용목록 없음(로컬은 항상 열림) */
+  }
+
+  // 로컬 저장소에서 내 보드 목록을 모은다(제목만 메타로 추출).
+  async listMine(): Promise<BoardSummary[]> {
+    const s = this.store()
+    if (!s) return []
+    const out: BoardSummary[] = []
+    for (let i = 0; i < s.length; i++) {
+      const k = s.key(i)
+      if (!k || !k.startsWith(STORAGE_PREFIX)) continue
+      const id = k.slice(STORAGE_PREFIX.length)
+      let title = '제목 없음'
+      try {
+        const b = deserialize(s.getItem(k) || '')
+        title = b.board?.title || title
+      } catch {
+        /* 손상 항목은 제목 기본값으로 둔다 */
+      }
+      out.push({ id, title, isPublic: false, status: 'ready' })
+    }
+    return out
+  }
+  async remove(id: string): Promise<void> {
+    const s = this.store()
+    if (s) s.removeItem(STORAGE_PREFIX + id)
+  }
+  async setPublic(_id: string, _isPublic: boolean): Promise<void> {
+    /* 목업: 공개 개념 없음(로컬은 항상 본인만 열람) */
   }
 }
 

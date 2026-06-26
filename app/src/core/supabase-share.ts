@@ -12,7 +12,7 @@
 import { isImageItem, type BoardState } from './board'
 import { attachSrcSets } from './srcset'
 import { getSupabase, hasSupabase, BOARDS_BUCKET } from './supabase'
-import { LocalShareAdapter, type LoadResult, type ShareAdapter, type ShareUser, type UploadOptions } from './share-adapter'
+import { LocalShareAdapter, type BoardSummary, type LoadResult, type ShareAdapter, type ShareUser, type UploadOptions } from './share-adapter'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
 // 서명 URL 수명: medium은 장수명(7일)+캐시로 egress 절감(P1#6). orig는 medium을 재사용하므로 동일.
@@ -76,6 +76,42 @@ export class SupabaseShareAdapter implements ShareAdapter {
     if (error) throw new Error('[4/4 허용목록(board_allowlist)] ' + error.message)
   }
 
+  // ---- 내 보드 관리(작성자) ----
+  // 내가 올린 보드 목록(최신순). boards_owner_all RLS로 owner=auth.uid() 행만 조회된다.
+  async listMine(): Promise<BoardSummary[]> {
+    const sb = this.sb()
+    const { data: userData } = await sb.auth.getUser()
+    const owner = userData.user?.id
+    if (!owner) return [] // 미로그인은 빈 목록(상위 UI가 로그인 유도).
+    const { data, error } = await sb
+      .from('boards')
+      .select('id,title,is_public,status,created_at,updated_at')
+      .eq('owner', owner)
+      .order('created_at', { ascending: false })
+    if (error) throw new Error('[보드 목록(boards SELECT)] ' + error.message)
+    return (data ?? []).map((r) => ({
+      id: r.id as string,
+      title: (r.title as string) || '제목 없음',
+      isPublic: !!r.is_public,
+      status: ((r.status as string) === 'uploading' ? 'uploading' : 'ready') as 'uploading' | 'ready',
+      createdAt: (r.created_at as string) ?? undefined,
+      updatedAt: (r.updated_at as string) ?? undefined,
+    }))
+  }
+
+  // 보드 삭제 — 이미지(Storage)를 먼저 비우고 메타 행을 삭제한다. allowlist는 FK on delete cascade로 함께 정리.
+  async remove(id: string): Promise<void> {
+    await this.removeFolder(id) // 먼저 비워야 고아 이미지가 남지 않는다.
+    const { error } = await this.sb().from('boards').delete().eq('id', id)
+    if (error) throw new Error('[보드 삭제(boards DELETE)] ' + error.message)
+  }
+
+  // 공개/비공개 전환(작성자만 — boards_owner_all RLS).
+  async setPublic(id: string, isPublic: boolean): Promise<void> {
+    const { error } = await this.sb().from('boards').update({ is_public: isPublic }).eq('id', id)
+    if (error) throw new Error('[공개 전환(boards UPDATE)] ' + error.message)
+  }
+
   // ---- 업로드(작성자) ----
   async upload(board: BoardState, opts?: UploadOptions): Promise<{ id: string; url: string }> {
     const sb = this.sb()
@@ -83,20 +119,47 @@ export class SupabaseShareAdapter implements ShareAdapter {
     const owner = userData.user?.id
     if (!owner) throw new Error('로그인이 필요합니다.')
 
-    const id = highEntropyId() // 고엔트로피 board_id(P1#2)
     const expiresAt = opts?.expiresAt ? opts.expiresAt.toISOString() : null
+    const title = board.board?.title ?? ''
 
-    // P1#5: 먼저 행을 'uploading'으로 삽입(고아 방지 기준점).
-    const ins = await sb.from('boards').insert({
-      id,
-      owner,
-      title: board.board?.title ?? '',
-      data: {},
-      status: 'uploading',
-      is_public: !!opts?.isPublic,
-      expires_at: expiresAt,
-    })
-    if (ins.error) throw new Error('[1/4 보드 생성(boards INSERT)] ' + ins.error.message)
+    // 재공유: reuseId가 내 소유로 살아 있으면 그 보드를 갱신(중복 누적 방지), 아니면 새 보드로 만든다.
+    let id = opts?.reuseId ?? highEntropyId() // 고엔트로피 board_id(P1#2)
+    let reusing = false
+    if (opts?.reuseId) {
+      const { data: mine } = await sb
+        .from('boards')
+        .select('id')
+        .eq('id', opts.reuseId)
+        .eq('owner', owner)
+        .maybeSingle()
+      if (mine) {
+        reusing = true
+        id = opts.reuseId
+        // 같은 board_id 폴더에 재업로드하므로(키 충돌·put은 upsert:false) 기존 이미지를 먼저 비운다.
+        await this.removeFolder(id)
+        const u0 = await sb
+          .from('boards')
+          .update({ title, status: 'uploading', is_public: !!opts?.isPublic, expires_at: expiresAt })
+          .eq('id', id)
+        if (u0.error) throw new Error('[1/4 보드 갱신(boards UPDATE)] ' + u0.error.message)
+      } else {
+        id = highEntropyId() // reuseId가 사라졌거나 내 소유가 아님 → 새 보드로 폴백
+      }
+    }
+
+    // 새 보드면 행을 'uploading'으로 먼저 삽입(P1#5: 고아 방지 기준점).
+    if (!reusing) {
+      const ins = await sb.from('boards').insert({
+        id,
+        owner,
+        title,
+        data: {},
+        status: 'uploading',
+        is_public: !!opts?.isPublic,
+        expires_at: expiresAt,
+      })
+      if (ins.error) throw new Error('[1/4 보드 생성(boards INSERT)] ' + ins.error.message)
+    }
 
     try {
       // attachSrcSets: 일반 이미지에 srcs(data URL) 생성 + 원본 src 비움(P1#4 코드 반영).
@@ -134,16 +197,19 @@ export class SupabaseShareAdapter implements ShareAdapter {
 
       return { id, url: this.getShareUrl(id) }
     } catch (e) {
-      // P1#5: 보상삭제 — boards 행 제거(Storage는 best-effort, 나머지는 고아 GC가 정리).
-      try {
-        await this.removeFolder(id)
-      } catch {
-        /* best-effort */
-      }
-      try {
-        await sb.from('boards').delete().eq('id', id)
-      } catch {
-        /* best-effort */
+      // 보상삭제는 '새로 만든' 보드만 한다 — 재사용 보드는 원래 사용자 소유라 지우면 안 되고,
+      // 실패 시 uploading 상태로 남아 다음 재공유로 복구된다(P1#5).
+      if (!reusing) {
+        try {
+          await this.removeFolder(id)
+        } catch {
+          /* best-effort */
+        }
+        try {
+          await sb.from('boards').delete().eq('id', id)
+        } catch {
+          /* best-effort */
+        }
       }
       throw e
     }

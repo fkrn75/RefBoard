@@ -55,6 +55,7 @@ import { openSettings } from './core/settings-panel'
 import { createVirtualizer } from './core/virtualize'
 import { getShareAdapter } from './core/supabase-share'
 import { openShareDialog } from './core/share-dialog'
+import { openBoardManager } from './core/board-manager'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -71,7 +72,25 @@ let cam = { ...board.camera }
 
 // ---- 데스크탑 UI 셸: 툴바 + 상태바(4.4) ----
 // 버튼 클릭은 모두 runAction(키맵과 동일 actionId)으로 흘려보내 단축키와 동작을 일원화한다.
-const toolbar = createToolbar({ onAction: (id) => runAction(id), isDesktop: isDesktop() })
+const toolbar = createToolbar({
+  onAction: (id) => runAction(id),
+  isDesktop: isDesktop(),
+  // 상태바 보드 이름 클릭 → 이름 변경(prompt). 변경은 자동저장에 즉시 반영.
+  onRenameBoard: () => {
+    const name = prompt('보드 이름', board.board.title || '')
+    if (name === null) return // 취소
+    board.board.title = name.trim() || '제목 없음'
+    void autosave.saveNow()
+    refreshBoardStatus()
+  },
+})
+
+// 상태바의 보드 이름·공유 배지를 현재 board 상태로 갱신한다(restore·이름변경·공유 후 호출).
+function refreshBoardStatus(): void {
+  const sid = board.board.shareId
+  const share: 'local' | 'public' | 'private' = !sid ? 'local' : board.board.sharePublic ? 'public' : 'private'
+  toolbar.updateStatus({ boardName: board.board.title || '제목 없음', share })
+}
 
 // ---- 활성 도구(텍스트·드로잉) 상태 ----
 // 'select'(기본)에서만 기존 선택/이동/러버밴드/기즈모가 동작한다. 나머지 도구는 캔버스 입력을
@@ -564,6 +583,7 @@ async function restore(state: BoardState, opts?: { keepCamera?: boolean }) {
   applyCam()
   sel.clear()
   hint.style.display = board.items.length > 0 ? 'none' : ''
+  refreshBoardStatus() // 상태바 보드 이름·공유 배지 갱신(열기·복구·undo/redo·세션 공용 출구)
 }
 
 // ---- 줌: 휠(커서 위치를 고정점으로) ----
@@ -1913,21 +1933,36 @@ async function shareWebLink() {
     const opts = await openShareDialog()
     if (!opts) return
     showToast('공유 준비 중(업로드)…', true)
-    const { url } = await adapter.upload(board, {
+    // 이미 공유한 보드면 그 board_id를 재사용해 같은 링크를 갱신한다(중복 누적 방지).
+    const prevShareId = board.board.shareId
+    const { id, url } = await adapter.upload(board, {
       isPublic: opts.isPublic,
       expiresAt: opts.expiresAt,
       allowEmails: opts.allowEmails,
+      reuseId: prevShareId,
     })
+    // 공유 id를 보드에 기억 → 다음 공유는 이 링크를 갱신. 즉시 자동저장으로 영속(브라우저를 닫아도 유지).
+    board.board.shareId = id
+    board.board.sharePublic = opts.isPublic
+    void autosave.saveNow()
+    refreshBoardStatus() // 공유 상태 배지(공개/비공개) 즉시 갱신
+    const updated = !!prevShareId && prevShareId === id
     try {
       await navigator.clipboard.writeText(url)
-      showToast('웹 뷰어 링크 복사됨: ' + url, true)
+      showToast((updated ? '기존 공유 링크 업데이트됨: ' : '웹 뷰어 링크 복사됨: ') + url, true)
     } catch {
-      showToast('웹 뷰어 링크: ' + url, true)
+      showToast((updated ? '기존 공유 링크 갱신됨: ' : '웹 뷰어 링크: ') + url, true)
     }
   } catch (e) {
     console.error('[share] 업로드 실패:', e) // 진단: F12 콘솔에 전체 에러(테이블/정책/details) 노출
     showToast(e instanceof Error ? e.message : '웹 공유 실패', true)
   }
+}
+
+// 내 공유 보드 관리 패널을 연다(목록·공개전환·삭제·링크복사). 데이터/삭제/전환은 어댑터에 위임.
+function openBoardManagerPanel(): void {
+  const adapter = getShareAdapter(location.origin + '/viewer.html')
+  openBoardManager({ adapter, onToast: showToast })
 }
 
 // 테마 변경 시 캔버스 배경 + 그리드 + 선택 외곽선을 새 색으로 다시 그린다.
@@ -2039,6 +2074,7 @@ function runAction(id: string) {
     // 앱(설정 패널)
     case 'app.settings': openSettings(); break
     case 'share.webLink': void shareWebLink(); break
+    case 'share.manage': openBoardManagerPanel(); break
   }
 }
 

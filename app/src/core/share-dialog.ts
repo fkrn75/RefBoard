@@ -115,11 +115,21 @@ export function openShareDialog(): Promise<ShareDialogResult | null> {
     pubRow.style.cssText = 'display:flex;align-items:center;gap:10px;cursor:pointer'
     const publicCheck = document.createElement('input')
     publicCheck.type = 'checkbox'
+    publicCheck.checked = true // 기본 공개 — 혼자 PC↔폰으로 보는 흔한 용도에서 매번 켜는 수고·실수를 없앤다.
     publicCheck.style.cssText = 'width:16px;height:16px;cursor:pointer;accent-color:var(--rb-accent, #4aa3ff)'
     const pubLabel = document.createElement('span')
     pubLabel.textContent = '링크가 있는 누구나 보기 (공개)'
     pubRow.appendChild(publicCheck)
     pubRow.appendChild(pubLabel)
+
+    // 공개/비공개에 따른 안내·경고(폰·다른 기기에서 열람 가능한지 명확히). 내용은 syncPublic이 채운다.
+    const pubHint = document.createElement('span')
+    pubHint.style.cssText = 'font-size:12px;line-height:1.5'
+    // 공개 토글 + 안내문을 한 컬럼으로 묶는다(아래 '허용 이메일' 행의 label+input+hint 패턴과 일관).
+    const pubBox = document.createElement('div')
+    pubBox.style.cssText = 'display:flex;flex-direction:column;gap:6px'
+    pubBox.appendChild(pubRow)
+    pubBox.appendChild(pubHint)
 
     // 2) 만료 선택.
     const expRow = document.createElement('div')
@@ -174,7 +184,7 @@ export function openShareDialog(): Promise<ShareDialogResult | null> {
     mailRow.appendChild(emailInput)
     mailRow.appendChild(mailHint)
 
-    body.appendChild(pubRow)
+    body.appendChild(pubBox)
     body.appendChild(expRow)
     body.appendChild(mailRow)
 
@@ -245,11 +255,20 @@ export function openShareDialog(): Promise<ShareDialogResult | null> {
       finish({ isPublic, expiresAt, allowEmails })
     }
 
-    // 공개 토글 시 이메일 입력을 비활성·흐리게(공개는 허용목록을 무시하므로).
+    // 공개 토글 시 이메일 입력을 비활성·흐리게(공개는 허용목록을 무시하므로) + 안내/경고문 갱신.
     const syncPublic = (): void => {
       const pub = publicCheck.checked
       emailInput.disabled = pub
       mailRow.style.opacity = pub ? '0.45' : '1'
+      // 공개=로그인 없이 누구나 열림 / 비공개=외부·폰에서 안 보일 수 있음(본인 로그인 필요) 경고.
+      if (pub) {
+        pubHint.textContent = '✓ 링크가 있으면 누구나 로그인 없이 볼 수 있어요 — 폰·다른 기기에서 바로 열립니다.'
+        pubHint.style.color = 'var(--rb-text-dim, #888)'
+      } else {
+        pubHint.textContent =
+          '⚠️ 비공개: 받는 사람도 본인 구글 로그인이 필요해요. 폰·다른 기기에선 안 보일 수 있습니다.'
+        pubHint.style.color = '#e0a33e'
+      }
     }
     publicCheck.addEventListener('change', syncPublic)
 

@@ -97,6 +97,11 @@ export interface BoardState {
     id: string
     title: string
     canvas: { bg: string }
+    // 마지막으로 클라우드 공유한 board_id. 있으면 재공유 시 새 보드를 만들지 않고 이 링크를 갱신한다
+    // (중복 누적 방지). serialize(JSON.stringify)로 .refb·자동저장에 함께 영속된다.
+    shareId?: string
+    // 마지막 공유 시 공개 여부(상태바 배지 표시용). shareId와 함께 영속된다.
+    sharePublic?: boolean
   }
   camera: { x: number; y: number; zoom: number }
   items: BoardItem[]
