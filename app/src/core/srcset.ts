@@ -92,9 +92,11 @@ export async function attachSrcSets(
       ? structuredClone(board)
       : (JSON.parse(JSON.stringify(board)) as BoardState)
 
-  // 다중해상도 대상: 이미지 + crop 없음 + GIF 아님(나머지는 src 폴백으로 안전).
+  // 다중해상도 대상: 이미지 + src 있음 + crop 없음 + GIF 아님(나머지는 src 폴백으로 안전).
+  // ⚠️ src가 비고 srcs만 있는 이미지(클라우드에서 불러온 보드)는 반드시 제외한다 — 포함하면
+  // buildSrcSet('')가 빈 값을 만들어 기존 srcs(dataURL)를 파괴한다(불러오기→재공유 시 원본 이미지 손실 버그).
   const targets = clone.items.filter(
-    (it): it is BoardImage => it.type === 'image' && !it.crop && !isGifSrc(it.src),
+    (it): it is BoardImage => it.type === 'image' && !!it.src && !it.crop && !isGifSrc(it.src),
   )
   const total = targets.length
   let done = 0
