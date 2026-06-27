@@ -122,11 +122,7 @@ export function serialize(state: BoardState): string {
   return JSON.stringify(state)
 }
 export function deserialize(json: string): BoardState {
-  const parsed: unknown = JSON.parse(json)
-  if (!isBoardState(parsed)) {
-    throw new Error('유효한 RefBoard 보드 데이터가 아닙니다.')
-  }
-  return parsed
+  return parseBoardState(JSON.parse(json))
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -213,6 +209,11 @@ function isBoardState(value: unknown): value is BoardState {
     return false
   }
   return Array.isArray(value.items) && value.items.every(isBoardItemValue)
+}
+
+export function parseBoardState(value: unknown): BoardState {
+  if (!isBoardState(value)) throw new Error('유효한 RefBoard 보드 데이터가 아닙니다.')
+  return value
 }
 
 // 짧은 고유 ID 생성 (crypto 우선, 미지원 환경은 폴백)

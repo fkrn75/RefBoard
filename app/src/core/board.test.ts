@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createEmptyBoard, deserialize, serialize, type BoardState } from './board'
+import { createEmptyBoard, deserialize, parseBoardState, serialize, type BoardState } from './board'
 
 const mixedBoard: BoardState = {
   schema: 'refboard/1.0',
@@ -99,6 +99,15 @@ describe('deserialize', () => {
     expect(() =>
       deserialize(JSON.stringify({ ...mixedBoard, camera: undefined })),
     ).toThrow('유효한 RefBoard 보드 데이터가 아닙니다.')
+  })
+
+  it('validates cloud board objects directly without string reparse', () => {
+    expect(parseBoardState(mixedBoard)).toEqual(mixedBoard)
+    const invalidBoard: unknown = {
+      ...mixedBoard,
+      board: { ...mixedBoard.board, canvas: { bg: 123 } },
+    }
+    expect(() => parseBoardState(invalidBoard)).toThrow('유효한 RefBoard 보드 데이터가 아닙니다.')
   })
 
   it('rejects corrupted board JSON when numeric fields are missing or not finite numbers', () => {

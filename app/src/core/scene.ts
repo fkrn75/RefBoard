@@ -178,20 +178,23 @@ export class Scene {
     return sprite
   }
 
-  private addBrokenImagePlaceholder(img: BoardImage, reason: unknown): Graphics {
-    console.warn('[scene.rebuild] 이미지 복구 실패, 플레이스홀더로 대체:', img.id, reason)
-    const size = croppedSize(img.crop, img.natural)
+  private addBrokenItemPlaceholder(it: BoardItem, reason: unknown): Graphics {
+    console.warn('[scene.rebuild] 아이템 복구 실패, 플레이스홀더로 대체:', it.id, reason)
+    const size = isImageItem(it) ? croppedSize(it.crop, it.natural) : it.natural
     const w = Math.max(48, size.w)
     const h = Math.max(48, size.h)
     const g = new Graphics()
+    const label = isImageItem(it) ? '이미지' : isNoteItem(it) ? '노트' : '드로잉'
     g.rect(-w / 2, -h / 2, w, h).fill({ color: 0x2b1b1b, alpha: 0.88 })
     g.rect(-w / 2, -h / 2, w, h).stroke({ color: 0xff6b6b, width: 3 })
-    g.moveTo(-w / 2, -h / 2).lineTo(w / 2, h / 2).moveTo(w / 2, -h / 2).lineTo(-w / 2, h / 2)
-    g.stroke({ color: 0xff6b6b, width: 3, alpha: 0.9 })
-    this.wireNode(g, img.id)
-    this.applyNodeTransform(g, img)
+    g.moveTo(-w / 2, -h / 2).lineTo(w / 2, h / 2).moveTo(w / 2, -h / 2).lineTo(-w / 2, h / 2).stroke({ color: 0xff6b6b, width: 3, alpha: 0.9 })
+    const text = new Text({ text: `${label}\n복구 실패`, style: { fontFamily: 'Pretendard, -apple-system, "Malgun Gothic", sans-serif', fontSize: Math.max(11, Math.min(16, Math.floor(Math.min(w, h) / 5))), fill: 0xffd9d9, align: 'center' } })
+    text.anchor.set(0.5)
+    g.addChild(text)
+    this.wireNode(g, it.id)
+    this.applyNodeTransform(g, it)
     this.world.addChild(g)
-    this.registerNode(img.id, g, { w, h }, img.transform.scale)
+    this.registerNode(it.id, g, { w, h }, it.transform.scale)
     return g
   }
 
@@ -369,11 +372,8 @@ export class Scene {
         try {
           await this.addItem(it)
         } catch (err) {
-          if (isImageItem(it)) {
-            this.addBrokenImagePlaceholder(it, err)
-            return
-          }
-          throw err
+          this.addBrokenItemPlaceholder(it, err)
+          return
         }
       }),
     )

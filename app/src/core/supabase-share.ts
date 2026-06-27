@@ -9,7 +9,7 @@
 //  - load: RLS select(0행=권한없음) → medium 7일 서명URL 치환 (P1#6)
 //  - assertNoDataUrls: 업로드 후 jsonb에 data URL 잔존 시 저장 중단 (P1#4)
 
-import { isImageItem, type BoardState } from './board'
+import { isImageItem, parseBoardState, type BoardState } from './board'
 import { attachSrcSets } from './srcset'
 import { getSupabase, hasSupabase, BOARDS_BUCKET } from './supabase'
 import { LocalShareAdapter, type BoardSummary, type LoadResult, type ShareAdapter, type ShareUser, type UploadOptions } from './share-adapter'
@@ -249,7 +249,7 @@ export class SupabaseShareAdapter implements ShareAdapter {
     }
     if (data.status !== 'ready') return { ok: false, reason: 'not-found' } // 업로드 미완
 
-    const board = data.data as BoardState
+    const board = parseBoardState(data.data)
     await this.signUrls(board) // Storage 키 → 서명 URL
     return { ok: true, board }
   }

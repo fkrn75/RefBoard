@@ -231,4 +231,32 @@ git push origin main
 
 ---
 
+## 10. 후속 보완 작업 (2026-06-27 Claude 검수에서 발견)
+
+> 커밋 `97db47c`(Phase 7.1 + 7.2)를 검수한 결과 **합격**: `npm run test` 11/11 · `npm run build` 0 에러 · 핵심 불변식(매직바이트 방어선·undo aliasing 없음·구버전 `.refb` 하위호환) 전부 OK.
+> 아래 후속 보완은 코드로 반영 완료. 현재 상태를 기준으로 적어둔다.
+
+### 10.1 [x] 클라우드 보드 load도 `deserialize` 검증 적용 — 검증 비대칭 해소
+- `app/src/core/board.ts`에 `parseBoardState()`를 분리해 object 경로를 직접 검증하고, `app/src/core/supabase-share.ts`의 클라우드 로드도 그 검증을 통과하도록 맞췄다.
+- `board.test.ts`에 object 직접 검증 케이스를 추가해 Supabase jsonb 경로를 회귀 가드했다.
+
+### 10.2 [x] 노트/드로잉 rebuild 실패도 가시화
+- `app/src/core/scene.ts`의 복구 실패 플레이스홀더를 아이템 공통으로 바꿔서, 이미지뿐 아니라 노트/드로잉도 누락 대신 화면에 남도록 했다.
+
+### 10.3 [x] `mapWithConcurrency` 계약 명확화
+- `app/src/core/concurrency.ts`는 `mapWithConcurrency()` 하나만 남기고, 실패는 호출자가 직접 다루는 fail-fast 계약임을 유지한다.
+
+### 10.4 [x] `mapWithConcurrencySettled` 미사용 해소
+- settled 변형은 제거했다. 범용 유틸은 `mapWithConcurrency()` 하나만 남기고, 테스트도 그 계약만 검증한다.
+
+### (참고·경미) 그 외
+- `board.ts`의 `board.canvas` 부분검증 — `shareId?`/`sharePublic?` 미검증(표시용, 크래시 클래스 아님). 여유 있으면 같이.
+
+### 작업 중 유지할 불변식 (재확인)
+- **매직바이트 방어선**(`refb.ts` `looksLikeImageBytes`/`sniffImageMime`) 우회·약화 금지.
+- `deserialize`는 **선택 필드를 요구하지 말 것**(구버전 `.refb` 하위호환). 기존 `board.test.ts` 전부 + 신규 케이스 통과 유지.
+- 검증: `cd app && npm run test && npm run build` 0 에러. 커밋 아이덴티티 `fkrn75@gmail.com`(§9).
+
+---
+
 — 끝. 막히면 `체크리스트.md` Phase 7과 위 §4 불변식을 다시 확인할 것.
