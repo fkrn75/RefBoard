@@ -3,6 +3,8 @@
 // 데이터/삭제/공개전환은 ShareAdapter(listMine/remove/setPublic)에 위임 — 이 모듈은 DOM만 담당한다.
 
 import type { ShareAdapter, BoardSummary } from './share-adapter'
+import { MODAL_Z_INDEX } from './constants'
+import { createFocusTrap } from './modal'
 
 // 동시에 하나만 — 이미 떠 있으면 무시(중복 모달 방지).
 let openRoot: HTMLDivElement | null = null
@@ -28,7 +30,7 @@ export function openBoardManager(options: BoardManagerOptions): void {
   backdrop.style.cssText = [
     'position:fixed',
     'inset:0',
-    'z-index:10000',
+    `z-index:${MODAL_Z_INDEX}`,
     'display:flex',
     'justify-content:center',
     'align-items:flex-start',
@@ -98,6 +100,7 @@ export function openBoardManager(options: BoardManagerOptions): void {
 
   panel.append(header, body)
   backdrop.appendChild(panel)
+  const focusTrap = createFocusTrap(backdrop)
 
   // ---- 닫기 처리 ----
   const onKey = (e: KeyboardEvent): void => {
@@ -105,6 +108,9 @@ export function openBoardManager(options: BoardManagerOptions): void {
       e.preventDefault()
       e.stopPropagation()
       close()
+    } else if (e.key === 'Tab') {
+      e.stopPropagation()
+      focusTrap.handleKeydown(e)
     } else {
       // 모달이 떠 있는 동안 전역 단축키 전파만 차단(캡처 단계).
       e.stopPropagation()
@@ -112,6 +118,7 @@ export function openBoardManager(options: BoardManagerOptions): void {
   }
   const close = (): void => {
     document.removeEventListener('keydown', onKey, true)
+    focusTrap.dispose()
     backdrop.remove()
     openRoot = null
   }
@@ -124,6 +131,7 @@ export function openBoardManager(options: BoardManagerOptions): void {
   document.addEventListener('keydown', onKey, true)
   document.body.appendChild(backdrop)
   openRoot = backdrop
+  focusTrap.activate()
   void renderList()
 
   // ---- 목록 렌더 ----

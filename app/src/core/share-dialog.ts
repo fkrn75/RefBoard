@@ -7,6 +7,9 @@
 //
 // 반환: 확인 시 { isPublic, expiresAt?, allowEmails }, 취소(Esc/바깥클릭/취소·닫기 버튼) 시 null.
 
+import { MODAL_Z_INDEX } from './constants'
+import { createFocusTrap, type FocusTrap } from './modal'
+
 // 만료 프리셋(라벨 → 일수. 0 = 만료 없음).
 interface ExpiryOption {
   label: string
@@ -40,6 +43,7 @@ export function openShareDialog(): Promise<ShareDialogResult | null> {
     // 1회 resolve 보장 플래그 + 정리에 쓸 전역 keydown 핸들러 참조.
     let settled = false
     let onDocKeydown: ((e: KeyboardEvent) => void) | null = null
+    let focusTrap: FocusTrap | null = null
 
     // ---- 백드롭(화면 전체 딤) ----
     const backdrop = document.createElement('div')
@@ -49,7 +53,7 @@ export function openShareDialog(): Promise<ShareDialogResult | null> {
     backdrop.style.cssText = [
       'position:fixed',
       'inset:0',
-      'z-index:10000',
+      `z-index:${MODAL_Z_INDEX}`,
       'display:flex',
       'justify-content:center',
       'align-items:flex-start',
@@ -239,6 +243,8 @@ export function openShareDialog(): Promise<ShareDialogResult | null> {
       if (settled) return
       settled = true
       if (onDocKeydown) document.removeEventListener('keydown', onDocKeydown, true)
+      focusTrap?.dispose()
+      focusTrap = null
       backdrop.remove()
       openRoot = null
       resolve(result)
@@ -294,6 +300,11 @@ export function openShareDialog(): Promise<ShareDialogResult | null> {
         confirmAndClose()
         return
       }
+      if (e.key === 'Tab') {
+        e.stopPropagation()
+        focusTrap?.handleKeydown(e)
+        return
+      }
       // 그 외 키는 폼 입력이 정상 동작하도록 두되, 전역 단축키로 전파만 차단.
       e.stopPropagation()
     }
@@ -302,7 +313,8 @@ export function openShareDialog(): Promise<ShareDialogResult | null> {
     // ---- 표시 ----
     document.body.appendChild(backdrop)
     openRoot = backdrop
+    focusTrap = createFocusTrap(backdrop)
+    focusTrap.activate()
     syncPublic()
-    emailInput.focus()
   })
 }

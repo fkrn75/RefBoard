@@ -11,10 +11,13 @@
 //    실제 "이어 열기"가 가능한 것은 마지막 세션(getLastSession) 하나뿐이다.
 
 import type { RecentEntry } from './recent'
+import { MODAL_Z_INDEX } from './constants'
+import { createFocusTrap, type FocusTrap } from './modal'
 
 // 동시에 하나만 — 이미 떠 있으면 무시(중복 모달 방지).
 let openRoot: HTMLDivElement | null = null
 let onDocKeydown: ((e: KeyboardEvent) => void) | null = null
+let focusTrap: FocusTrap | null = null
 
 // 최근 파일 모달을 연다.
 //  - entries: 표시할 최근 항목(보통 getRecent()). 비어 있으면 "최근 항목 없음" 안내.
@@ -37,7 +40,7 @@ export function openRecentPicker(opts: {
   backdrop.style.cssText = [
     'position:fixed',
     'inset:0',
-    'z-index:10000',
+    `z-index:${MODAL_Z_INDEX}`,
     'display:flex',
     'justify-content:center',
     'align-items:flex-start',
@@ -151,6 +154,11 @@ export function openRecentPicker(opts: {
       close()
       return
     }
+    if (e.key === 'Tab') {
+      e.stopPropagation()
+      focusTrap?.handleKeydown(e)
+      return
+    }
     // 그 외 키는 전역 단축키로 전파만 차단.
     e.stopPropagation()
   }
@@ -159,6 +167,8 @@ export function openRecentPicker(opts: {
   // ---- 표시 ----
   document.body.appendChild(backdrop)
   openRoot = backdrop
+  focusTrap = createFocusTrap(backdrop)
+  focusTrap.activate()
 }
 
 // 모달을 닫고 DOM·전역 리스너를 정리한다(중복 호출 안전).
@@ -168,6 +178,8 @@ function close(): void {
     document.removeEventListener('keydown', onDocKeydown, true)
     onDocKeydown = null
   }
+  focusTrap?.dispose()
+  focusTrap = null
   openRoot.remove()
   openRoot = null
 }

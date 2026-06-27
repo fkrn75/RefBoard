@@ -83,8 +83,8 @@ export function clearRecent(): void {
 export function setLastSession(state: BoardState): void {
   try {
     safeSet(LAST_SESSION_KEY, serialize(state))
-  } catch {
-    // 용량 초과·직렬화 실패 모두 무시(마지막 세션은 "있으면 좋은" 편의 기능).
+  } catch (err) {
+    console.warn('[recent] 마지막 세션 저장 실패', err)
   }
 }
 
@@ -94,7 +94,8 @@ export function getLastSession(): BoardState | null {
   if (!raw) return null
   try {
     return deserialize(raw)
-  } catch {
+  } catch (err) {
+    console.warn('[recent] 마지막 세션 손상 또는 파싱 실패', err)
     return null
   }
 }

@@ -15,6 +15,8 @@
 //    사용자가 재바인딩한 키가 그대로 반영되게 한다.
 
 import { type Action, getBinding } from './keymap'
+import { MODAL_Z_INDEX } from './constants'
+import { createFocusTrap, type FocusTrap } from './modal'
 
 // ---- 모듈 상태(싱글턴 오버레이) ----
 // 팔레트는 동시에 하나만 뜨면 충분하므로 모듈 레벨에 단일 인스턴스를 둔다.
@@ -29,6 +31,7 @@ let activeIndex = 0 // 키보드 하이라이트 위치(filtered 기준)
 
 // 외부에서 주입되는 이벤트 핸들러 참조(닫을 때 정확히 해제하기 위해 보관).
 let onDocKeydown: ((e: KeyboardEvent) => void) | null = null
+let focusTrap: FocusTrap | null = null
 
 // ---- 공개 API ----
 
@@ -64,6 +67,8 @@ export function closePalette(): void {
     document.removeEventListener('keydown', onDocKeydown, true)
     onDocKeydown = null
   }
+  focusTrap?.dispose()
+  focusTrap = null
   root.remove()
   root = null
   input = null
@@ -85,7 +90,7 @@ function buildDom(): void {
   backdrop.style.cssText = [
     'position:fixed',
     'inset:0',
-    'z-index:10000',
+    `z-index:${MODAL_Z_INDEX}`,
     'display:flex',
     'justify-content:center',
     'align-items:flex-start',
@@ -153,6 +158,8 @@ function buildDom(): void {
   root = backdrop
   input = inp
   listEl = list
+  focusTrap = createFocusTrap(backdrop)
+  focusTrap.activate()
 }
 
 // ---- 검색/렌더 ----
@@ -292,6 +299,10 @@ function handleKeydown(e: KeyboardEvent): void {
       e.preventDefault()
       e.stopPropagation()
       setActive(activeIndex - 1)
+      break
+    case 'Tab':
+      e.stopPropagation()
+      focusTrap?.handleKeydown(e)
       break
     case 'Enter':
       e.preventDefault()

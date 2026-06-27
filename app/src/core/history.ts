@@ -22,7 +22,7 @@
 //   그 base64 문자열까지 통째로 복제되므로, 임베드 용량이 크면 스냅샷 1개 메모리가 클 수 있다.
 //   상한(LIMIT)으로 누적 개수를 제한해 메모리 폭주를 막는다.
 
-import type { BoardState } from './board'
+import type { BoardDrawing, BoardImage, BoardItem, BoardNote, BoardState, Crop, ImageSrcSet, Transform } from './board'
 
 // 스택에 보관할 최대 스냅샷 개수. 초과 시 가장 오래된 항목부터 버린다.
 const LIMIT = 200
@@ -35,7 +35,7 @@ export class History {
 
   // 변경 직전에 호출. 현재 상태의 깊은 복제 스냅샷을 undo 스택에 쌓고 redo를 비운다.
   push(state: BoardState): void {
-    this.undoStack.push(clone(state))
+    this.undoStack.push(cloneBoardForHistory(state))
     this.redoStack.length = 0 // 새 변경 → 미래(redo) 분기 폐기
     if (this.undoStack.length > LIMIT) {
       this.undoStack.splice(0, this.undoStack.length - LIMIT)
@@ -47,16 +47,16 @@ export class History {
   undo(current: BoardState): BoardState | null {
     const prev = this.undoStack.pop()
     if (prev === undefined) return null
-    this.redoStack.push(clone(current)) // 현재 상태를 redo용으로 보존(핵심)
-    return clone(prev)
+    this.redoStack.push(cloneBoardForHistory(current)) // 현재 상태를 redo용으로 보존(핵심)
+    return cloneBoardForHistory(prev)
   }
 
   // 한 단계 다시 실행. current를 undo 스택으로 되돌리고, 앞선 상태를 반환.
   redo(current: BoardState): BoardState | null {
     const next = this.redoStack.pop()
     if (next === undefined) return null
-    this.undoStack.push(clone(current)) // 현재 상태를 undo용으로 보존(핵심)
-    return clone(next)
+    this.undoStack.push(cloneBoardForHistory(current)) // 현재 상태를 undo용으로 보존(핵심)
+    return cloneBoardForHistory(next)
   }
 
   canUndo(): boolean {
@@ -73,10 +73,100 @@ export class History {
   }
 }
 
-// 깊은 복제 헬퍼. structuredClone 미지원(구형) 환경은 JSON 라운드트립으로 폴백.
-// BoardState는 순수 직렬화 가능 데이터(함수/순환참조 없음)라 두 경로 모두 안전.
-function clone(state: BoardState): BoardState {
-  const sc = (globalThis as { structuredClone?: <T>(v: T) => T }).structuredClone
-  if (typeof sc === 'function') return sc(state)
-  return JSON.parse(JSON.stringify(state)) as BoardState
+export function cloneBoardForHistory(state: BoardState): BoardState {
+  return {
+    schema: state.schema,
+    board: {
+      id: state.board.id,
+      title: state.board.title,
+      canvas: { bg: state.board.canvas.bg },
+      ...(state.board.shareId !== undefined ? { shareId: state.board.shareId } : {}),
+      ...(state.board.sharePublic !== undefined ? { sharePublic: state.board.sharePublic } : {}),
+    },
+    camera: { x: state.camera.x, y: state.camera.y, zoom: state.camera.zoom },
+    items: state.items.map(cloneItem),
+  }
+}
+
+function cloneTransform(transform: Transform): Transform {
+  return {
+    x: transform.x,
+    y: transform.y,
+    scale: transform.scale,
+    rotation: transform.rotation,
+    ...(transform.flipX !== undefined ? { flipX: transform.flipX } : {}),
+    ...(transform.flipY !== undefined ? { flipY: transform.flipY } : {}),
+  }
+}
+
+function cloneCrop(crop: Crop): Crop {
+  return { x: crop.x, y: crop.y, w: crop.w, h: crop.h }
+}
+
+function cloneSrcSet(srcs: ImageSrcSet): ImageSrcSet {
+  return { thumb: srcs.thumb, medium: srcs.medium, orig: srcs.orig }
+}
+
+function cloneImage(item: BoardImage): BoardImage {
+  return {
+    id: item.id,
+    type: 'image',
+    src: item.src,
+    ...(item.srcs !== undefined ? { srcs: cloneSrcSet(item.srcs) } : {}),
+    natural: { w: item.natural.w, h: item.natural.h },
+    transform: cloneTransform(item.transform),
+    ...(item.crop !== undefined ? { crop: cloneCrop(item.crop) } : {}),
+    opacity: item.opacity,
+    locked: item.locked,
+    ...(item.groupId !== undefined ? { groupId: item.groupId } : {}),
+    z: item.z,
+    ...(item.comment !== undefined ? { comment: item.comment } : {}),
+    ...(item.name !== undefined ? { name: item.name } : {}),
+    ...(item.addedAt !== undefined ? { addedAt: item.addedAt } : {}),
+  }
+}
+
+function cloneNote(item: BoardNote): BoardNote {
+  return {
+    id: item.id,
+    type: 'note',
+    text: item.text,
+    fontSize: item.fontSize,
+    ...(item.fontFamily !== undefined ? { fontFamily: item.fontFamily } : {}),
+    color: item.color,
+    natural: { w: item.natural.w, h: item.natural.h },
+    transform: cloneTransform(item.transform),
+    opacity: item.opacity,
+    locked: item.locked,
+    ...(item.groupId !== undefined ? { groupId: item.groupId } : {}),
+    z: item.z,
+  }
+}
+
+function cloneDrawing(item: BoardDrawing): BoardDrawing {
+  return {
+    id: item.id,
+    type: 'drawing',
+    tool: item.tool,
+    points: item.points.map((point) => ({ x: point.x, y: point.y })),
+    color: item.color,
+    width: item.width,
+    natural: { w: item.natural.w, h: item.natural.h },
+    transform: cloneTransform(item.transform),
+    opacity: item.opacity,
+    locked: item.locked,
+    ...(item.groupId !== undefined ? { groupId: item.groupId } : {}),
+    z: item.z,
+  }
+}
+
+function cloneItem(item: BoardItem): BoardItem {
+  switch (item.type) {
+    case 'image':
+      return cloneImage(item)
+    case 'note':
+      return cloneNote(item)
+    case 'drawing':
+      return cloneDrawing(item)
+  }
 }

@@ -208,13 +208,13 @@ export class SupabaseShareAdapter implements ShareAdapter {
       if (!reusing) {
         try {
           await this.removeFolder(id)
-        } catch {
-          /* best-effort */
+        } catch (cleanupErr) {
+          console.warn('[share] 업로드 실패 후 Storage 보상삭제 실패:', id, cleanupErr)
         }
         try {
           await sb.from('boards').delete().eq('id', id)
-        } catch {
-          /* best-effort */
+        } catch (cleanupErr) {
+          console.warn('[share] 업로드 실패 후 DB 보상삭제 실패:', id, cleanupErr)
         }
       }
       throw e
@@ -263,7 +263,8 @@ export class SupabaseShareAdapter implements ShareAdapter {
       const { data, error } = await this.sb().rpc('board_block_reason', { p_board_id: id })
       if (error) return null
       return data === 'expired' || data === 'forbidden' || data === 'not_found' ? data : null
-    } catch {
+    } catch (err) {
+      console.warn('[share] 차단 사유 확인 실패', err)
       return null
     }
   }
@@ -296,14 +297,24 @@ export class SupabaseShareAdapter implements ShareAdapter {
   // 보드 안의 Storage 키들을 한 번에 서명 URL로 치환(뷰어가 그대로 문자열 src로 사용).
   private async signUrls(board: BoardState): Promise<void> {
     const keys = new Set<string>()
+    const owners = new Map<string, string[]>()
     const isKey = (s: string) => !!s && !s.startsWith('data:') && !/^https?:/i.test(s) && !s.startsWith('blob:')
+    const trackKey = (key: string, owner: string): void => {
+      if (!isKey(key)) return
+      keys.add(key)
+      const list = owners.get(key)
+      if (list) list.push(owner)
+      else owners.set(key, [owner])
+    }
     // 노트/드로잉은 Storage 키가 없으므로 isImageItem으로 걸러 서명 대상에서 제외한다.
     for (const it of board.items) {
       if (!isImageItem(it)) continue
       if (it.srcs) {
-        for (const k of [it.srcs.thumb, it.srcs.medium, it.srcs.orig]) if (isKey(k)) keys.add(k)
+        trackKey(it.srcs.thumb, `${it.id}:srcs.thumb`)
+        trackKey(it.srcs.medium, `${it.id}:srcs.medium`)
+        trackKey(it.srcs.orig, `${it.id}:srcs.orig`)
       } else if (it.src && isKey(it.src)) {
-        keys.add(it.src)
+        trackKey(it.src, `${it.id}:src`)
       }
     }
     if (keys.size === 0) return
@@ -318,7 +329,12 @@ export class SupabaseShareAdapter implements ShareAdapter {
     for (const e of data ?? []) if (e.path && e.signedUrl) map.set(e.path, e.signedUrl)
     // 부분 누락(일부 키만 서명 실패): 그 이미지는 키 문자열이 남아 검정이 되므로 경고로 표면화(렌더는 진행).
     const missing = list.filter((k) => !map.has(k))
-    if (missing.length) console.warn('[뷰어] 서명 URL 누락 키(검정 위험):', missing)
+    if (missing.length) {
+      console.warn(
+        '[뷰어] 서명 URL 누락 키(검정 위험):',
+        missing.map((key) => ({ key, owners: owners.get(key) ?? [] })),
+      )
+    }
 
     for (const it of board.items) {
       if (!isImageItem(it)) continue

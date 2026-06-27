@@ -45,6 +45,7 @@ export interface ToolbarOptions {
 export interface ToolbarHandle {
   updateStatus(s: Partial<ToolbarStatus>): void // 상태바 부분 갱신(생략 필드는 유지)
   setActive(actionId: string, on: boolean): void // 토글성 버튼(항상위 등)의 활성 표시 on/off
+  setDisabled(actionId: string, disabled: boolean): void
   destroy(): void // DOM 제거 + 리스너 해제(스타일 태그는 공유 자원이라 남겨둔다)
 }
 
@@ -392,6 +393,10 @@ export function createToolbar(opts: ToolbarOptions): ToolbarHandle {
     },
     setActive(actionId: string, on: boolean): void {
       btnByAction.get(actionId)?.classList.toggle('rb-active', on)
+    },
+    setDisabled(actionId: string, disabled: boolean): void {
+      const button = btnByAction.get(actionId)
+      if (button) button.disabled = disabled
     },
     destroy(): void {
       toolbar.removeEventListener('click', onToolbarClick)

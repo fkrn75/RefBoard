@@ -178,6 +178,23 @@ export class Scene {
     return sprite
   }
 
+  private addBrokenImagePlaceholder(img: BoardImage, reason: unknown): Graphics {
+    console.warn('[scene.rebuild] 이미지 복구 실패, 플레이스홀더로 대체:', img.id, reason)
+    const size = croppedSize(img.crop, img.natural)
+    const w = Math.max(48, size.w)
+    const h = Math.max(48, size.h)
+    const g = new Graphics()
+    g.rect(-w / 2, -h / 2, w, h).fill({ color: 0x2b1b1b, alpha: 0.88 })
+    g.rect(-w / 2, -h / 2, w, h).stroke({ color: 0xff6b6b, width: 3 })
+    g.moveTo(-w / 2, -h / 2).lineTo(w / 2, h / 2).moveTo(w / 2, -h / 2).lineTo(-w / 2, h / 2)
+    g.stroke({ color: 0xff6b6b, width: 3, alpha: 0.9 })
+    this.wireNode(g, img.id)
+    this.applyNodeTransform(g, img)
+    this.world.addChild(g)
+    this.registerNode(img.id, g, { w, h }, img.transform.scale)
+    return g
+  }
+
   // crop(원본 픽셀 사각형) 반영 — 공유 source는 유지하고 frame만 교체(비파괴). GIF는 미지원.
   // crop이 없으면 원본 전체 frame으로 되돌린다(크롭 리셋 경로).
   applyCrop(id: string, img: BoardImage) {
@@ -347,7 +364,23 @@ export class Scene {
     for (const id of [...this.nodes.keys()]) this.removeItem(id)
     // 병렬 디코드 — 순차 await는 열기·Undo·Redo에서 전체 재디코드가 직렬이라 대량 보드에서 느리다(perf P2).
     // z 순서는 node.zIndex(applyNodeTransform) + world.sortableChildren이 보장하므로 추가 순서는 무관하다.
-    await Promise.all(items.map((it) => this.addItem(it)))
+    const results = await Promise.allSettled(
+      items.map(async (it) => {
+        try {
+          await this.addItem(it)
+        } catch (err) {
+          if (isImageItem(it)) {
+            this.addBrokenImagePlaceholder(it, err)
+            return
+          }
+          throw err
+        }
+      }),
+    )
+    const failures = results.filter((result) => result.status === 'rejected')
+    if (failures.length > 0) {
+      console.warn('[scene.rebuild] 일부 아이템 복구 실패:', failures)
+    }
   }
 
   // ---- 노드 맵 관리(내부) ----

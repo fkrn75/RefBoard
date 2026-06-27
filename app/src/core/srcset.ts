@@ -14,13 +14,20 @@
 // 정합이 복잡하므로, crop이 있는 이미지와 GIF(정지 축소 시 애니 손실)는 srcset 생성에서
 // 제외한다(→ src 폴백으로 안전).
 
-import { downscaleIfLarge, canDecodeImage } from './downscale'
+import { IMAGE_MAX_EDGE } from './constants'
+import { canDecodeImage } from './downscale'
 import type { BoardState, BoardImage, ImageSrcSet } from './board'
 
 export interface SrcSetOptions {
   thumbEdge?: number  // thumb 긴 변(px). 기본 256
   mediumEdge?: number // medium 긴 변(px). 기본 1024
   origEdge?: number   // orig 상한 긴 변(px). 초과만 축소(이하 원본 보존). 기본 4096
+}
+
+interface SrcSetVariant {
+  key: keyof ImageSrcSet
+  edge: number
+  quality: number
 }
 
 // WebP 인코딩 가능 여부(브라우저 1회 감지 후 캐시). 미지원이면 downscale가 PNG/JPEG로 폴백.
@@ -53,26 +60,79 @@ function isGifSrc(src: string): boolean {
 export async function buildSrcSet(src: string, opts: SrcSetOptions = {}): Promise<ImageSrcSet> {
   const thumbEdge = opts.thumbEdge ?? 256
   const mediumEdge = opts.mediumEdge ?? 1024
-  const origEdge = opts.origEdge ?? 4096
+  const origEdge = opts.origEdge ?? IMAGE_MAX_EDGE
   const format: 'auto' | 'webp' = canEncodeWebp() ? 'webp' : 'auto'
 
-  // 각 해상도 독립 생성 — 한 해상도가 실패해도 나머지는 살린다.
-  // (단순성 우선: 해상도별로 원본을 다시 디코드한다. 1회 디코드 재사용 최적화는 후속.)
-  const make = async (maxEdge: number, quality: number): Promise<string> => {
-    try {
-      const r = await downscaleIfLarge(src, { maxEdge, quality, format })
-      return r.dataUrl
-    } catch {
-      return src // 실패 시 원본 폴백
+  try {
+    return await buildSrcSetFromOneDecode(src, [
+      { key: 'thumb', edge: thumbEdge, quality: 0.7 },
+      { key: 'medium', edge: mediumEdge, quality: 0.82 },
+      { key: 'orig', edge: origEdge, quality: 0.9 },
+    ], format)
+  } catch {
+    return { thumb: src, medium: src, orig: src }
+  }
+}
+
+function loadSourceImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('srcset 이미지 디코드 실패'))
+    img.src = src
+  })
+}
+
+async function canvasToDataUrl(canvas: HTMLCanvasElement, mime: string, quality: number): Promise<string> {
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mime, quality))
+  if (!blob) return canvas.toDataURL(mime, quality)
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(blob)
+  })
+}
+
+async function buildSrcSetFromOneDecode(
+  src: string,
+  variants: readonly SrcSetVariant[],
+  format: 'auto' | 'webp',
+): Promise<ImageSrcSet> {
+  const img = await loadSourceImage(src)
+  const width = img.naturalWidth
+  const height = img.naturalHeight
+  if (width <= 0 || height <= 0) throw new Error('srcset 이미지 크기를 확인할 수 없습니다')
+
+  const result: Partial<ImageSrcSet> = {}
+  for (const variant of variants) {
+    const longest = Math.max(width, height)
+    if (longest <= variant.edge) {
+      result[variant.key] = src
+      continue
     }
+    const ratio = variant.edge / longest
+    const targetW = Math.max(1, Math.round(width * ratio))
+    const targetH = Math.max(1, Math.round(height * ratio))
+    const canvas = document.createElement('canvas')
+    canvas.width = targetW
+    canvas.height = targetH
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      result[variant.key] = src
+      continue
+    }
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(img, 0, 0, targetW, targetH)
+    result[variant.key] = await canvasToDataUrl(canvas, format === 'webp' ? 'image/webp' : 'image/png', variant.quality)
   }
 
-  const [thumb, medium, orig] = await Promise.all([
-    make(thumbEdge, 0.7),
-    make(mediumEdge, 0.82),
-    make(origEdge, 0.9),
-  ])
-  return { thumb, medium, orig }
+  return {
+    thumb: result.thumb ?? src,
+    medium: result.medium ?? src,
+    orig: result.orig ?? src,
+  }
 }
 
 /**
@@ -102,8 +162,7 @@ export async function attachSrcSets(
   let done = 0
   opts.onProgress?.(0, total)
 
-  // 장끼리는 순차 — 대량 보드에서 동시에 수십 장×3해상도를 인코딩하면 메모리가 폭증한다.
-  // (한 장당 buildSrcSet 내부에서 3해상도는 병렬, 장끼리는 순차로 균형.)
+  // 장끼리는 순차로 유지해 대량 공유 시 인코딩 메모리 피크를 제한한다.
   for (const img of targets) {
     const prev = img.srcs // 기존 srcs(클라우드/.refb에서 불러온 보드면 존재) — 손상 방어용 보존 후보
 

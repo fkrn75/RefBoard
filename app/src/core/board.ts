@@ -122,7 +122,97 @@ export function serialize(state: BoardState): string {
   return JSON.stringify(state)
 }
 export function deserialize(json: string): BoardState {
-  return JSON.parse(json) as BoardState
+  const parsed: unknown = JSON.parse(json)
+  if (!isBoardState(parsed)) {
+    throw new Error('유효한 RefBoard 보드 데이터가 아닙니다.')
+  }
+  return parsed
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isOptionalBoolean(value: unknown): boolean {
+  return value === undefined || typeof value === 'boolean'
+}
+
+function isSize(value: unknown): value is { w: number; h: number } {
+  return isRecord(value) && isFiniteNumber(value.w) && isFiniteNumber(value.h)
+}
+
+function isTransform(value: unknown): value is Transform {
+  return (
+    isRecord(value) &&
+    isFiniteNumber(value.x) &&
+    isFiniteNumber(value.y) &&
+    isFiniteNumber(value.scale) &&
+    isFiniteNumber(value.rotation) &&
+    isOptionalBoolean(value.flipX) &&
+    isOptionalBoolean(value.flipY)
+  )
+}
+
+function hasBaseItemFields(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.id === 'string' &&
+    isSize(value.natural) &&
+    isTransform(value.transform) &&
+    isFiniteNumber(value.opacity) &&
+    typeof value.locked === 'boolean' &&
+    isFiniteNumber(value.z)
+  )
+}
+
+function isPoint(value: unknown): value is { x: number; y: number } {
+  return isRecord(value) && isFiniteNumber(value.x) && isFiniteNumber(value.y)
+}
+
+function isDrawingTool(value: unknown): value is DrawingTool {
+  return value === 'pen' || value === 'line' || value === 'rect' || value === 'ellipse' || value === 'arrow'
+}
+
+function isBoardItemValue(value: unknown): value is BoardItem {
+  if (!isRecord(value) || !hasBaseItemFields(value)) return false
+
+  switch (value.type) {
+    case 'image':
+      return typeof value.src === 'string'
+    case 'note':
+      return (
+        typeof value.text === 'string' &&
+        isFiniteNumber(value.fontSize) &&
+        typeof value.color === 'string'
+      )
+    case 'drawing':
+      return (
+        isDrawingTool(value.tool) &&
+        Array.isArray(value.points) &&
+        value.points.every(isPoint) &&
+        typeof value.color === 'string' &&
+        isFiniteNumber(value.width)
+      )
+    default:
+      return false
+  }
+}
+
+function isBoardState(value: unknown): value is BoardState {
+  if (!isRecord(value)) return false
+  if (value.schema !== 'refboard/1.0') return false
+  if (!isRecord(value.board) || !isRecord(value.board.canvas)) return false
+  if (typeof value.board.id !== 'string') return false
+  if (typeof value.board.title !== 'string') return false
+  if (typeof value.board.canvas.bg !== 'string') return false
+  if (!isRecord(value.camera)) return false
+  if (!isFiniteNumber(value.camera.x) || !isFiniteNumber(value.camera.y) || !isFiniteNumber(value.camera.zoom)) {
+    return false
+  }
+  return Array.isArray(value.items) && value.items.every(isBoardItemValue)
 }
 
 // 짧은 고유 ID 생성 (crypto 우선, 미지원 환경은 폴백)

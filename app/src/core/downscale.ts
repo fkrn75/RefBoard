@@ -12,6 +12,8 @@
 // - 알파 보존: 알파 가능 입력(PNG/WebP/GIF/dataURL 등)이면 image/png 유지,
 //   불투명이 확실한 입력(JPEG)만 image/jpeg(quality). 보수적으로 PNG 기본.
 
+import { IMAGE_MAX_EDGE } from './constants'
+
 export interface DownscaleOptions {
   /** 긴 변 최대 픽셀. 이 값을 넘으면 비율 유지로 축소. 기본 4096 */
   maxEdge?: number
@@ -196,7 +198,7 @@ async function sourceToDataURL(src: ImageSource): Promise<string> {
  * 실패 시 throw하지 않고 원본을 graceful 반환하며 콘솔 경고를 남긴다.
  */
 export async function downscaleIfLarge(src: ImageSource, opts: DownscaleOptions = {}): Promise<DownscaleResult> {
-  const maxEdge = opts.maxEdge ?? 4096
+  const maxEdge = opts.maxEdge ?? IMAGE_MAX_EDGE
   const quality = opts.quality ?? 0.92
   const stepwise = opts.stepwise ?? true
 

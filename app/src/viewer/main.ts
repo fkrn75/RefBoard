@@ -9,6 +9,7 @@ import { renderBoardMeta } from './board-meta'
 import { attachTouchGestures } from './touch'
 import { registerServiceWorker } from './pwa'
 import { getShareAdapter } from '../core/supabase-share'
+import { ZOOM_MAX, ZOOM_MIN } from '../core/constants'
 
 const host = document.getElementById('app') as HTMLElement
 
@@ -43,7 +44,7 @@ function applyCam(): void {
   scene.setCamera(cam.x, cam.y, cam.zoom)
 }
 function clampZoom(z: number): number {
-  return Math.min(20, Math.max(0.05, z))
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z))
 }
 // 전체 보기(콘텐츠 AABB가 화면에 꽉 차도록).
 function fitAll(pad = 0.9): void {

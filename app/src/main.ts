@@ -14,7 +14,7 @@ import {
   type Transform,
 } from './core/board'
 import { Selection } from './core/selection'
-import { packImages } from './core/pack'
+import { packImagesOffThread } from './core/pack-worker-client'
 import { loadBoardFile, loadBoardBlob, pickRefbFile } from './core/io'
 import { History } from './core/history'
 import { Minimap } from './core/minimap'
@@ -38,6 +38,9 @@ import { applyTheme, getTheme, onThemeChange } from './core/theme'
 import { registerActions, matchKey, getActions, DEFAULT_ACTIONS, type Action } from './core/keymap'
 import { openPalette, isPaletteOpen } from './core/command-palette'
 import { downscaleIfLarge, canDecodeImage, blobToDataURL } from './core/downscale'
+import { IMAGE_MAX_EDGE, OVERLAY_Z_INDEX, ZOOM_MAX, ZOOM_MIN } from './core/constants'
+import { mapWithConcurrency } from './core/concurrency'
+import { attachEditorTwoFingerGestures } from './core/editor-touch'
 import {
   isDesktop,
   saveRefbNative,
@@ -63,12 +66,33 @@ const hint = document.getElementById('hint') as HTMLElement
 
 // board는 undo/redo·열기로 통째 교체될 수 있어 let.
 let board: BoardState = createEmptyBoard()
+let itemIndexSource: BoardItem[] | null = null
+let itemIndexLength = -1
+let itemIndex = new Map<string, BoardItem>()
+let lockedCacheSource: BoardItem[] | null = null
+let lockedCacheLength = -1
+let lockedCacheRevision = 0
+let lockedCacheSeenRevision = -1
+let lockedCache = new Set<string>()
 // 테마 부팅: 저장된 테마를 캔버스 생성 전에 적용해 배경/그리드 색이 처음부터 일치하게 한다.
 applyTheme(getTheme())
 const scene = await Scene.create(host)
 const sel = new Selection()
 const history = new History()
 let cam = { ...board.camera }
+
+function getItem(id: string): BoardItem | undefined {
+  if (itemIndexSource !== board.items || itemIndexLength !== board.items.length) {
+    itemIndex = new Map(board.items.map((item) => [item.id, item]))
+    itemIndexSource = board.items
+    itemIndexLength = board.items.length
+  }
+  return itemIndex.get(id)
+}
+
+function markLockedCacheDirty(): void {
+  lockedCacheRevision += 1
+}
 
 // ---- 데스크탑 UI 셸: 툴바 + 상태바(4.4) ----
 // 버튼 클릭은 모두 runAction(키맵과 동일 actionId)으로 흘려보내 단축키와 동작을 일원화한다.
@@ -231,7 +255,7 @@ const loadingEl = document.createElement('div')
 loadingEl.style.cssText =
   'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:14px 22px;' +
   'background:rgba(20,20,20,.85);color:#eee;border-radius:10px;font:14px system-ui,sans-serif;' +
-  'pointer-events:none;z-index:9999;display:none;box-shadow:0 6px 20px rgba(0,0,0,.5)'
+  `pointer-events:none;z-index:${OVERLAY_Z_INDEX};display:none;box-shadow:0 6px 20px rgba(0,0,0,.5)`
 document.body.appendChild(loadingEl)
 function showLoading(text: string) {
   loadingEl.textContent = text
@@ -245,7 +269,7 @@ const toastEl = document.createElement('div')
 toastEl.style.cssText =
   'position:fixed;left:50%;bottom:32px;transform:translateX(-50%);padding:10px 18px;' +
   'color:#fff;border-radius:8px;font:13px system-ui,sans-serif;pointer-events:none;' +
-  'z-index:9999;opacity:0;transition:opacity .25s;max-width:80vw;text-align:center'
+  `z-index:${OVERLAY_Z_INDEX};opacity:0;transition:opacity .25s;max-width:80vw;text-align:center`
 document.body.appendChild(toastEl)
 let toastTimer = 0
 function showToast(msg: string, info = false) {
@@ -272,8 +296,9 @@ window.addEventListener('beforeunload', (e) => {
   // 종료 직전 현재 보드를 "마지막 세션"으로 저장(다음 실행에서 이어 열기). 동기 localStorage라 안전.
   try {
     setLastSession(board)
-  } catch {
+  } catch (err) {
     // 용량 초과 등은 무시(마지막 세션은 "있으면 좋은" 편의 기능)
+    console.warn('[recent] 마지막 세션 저장 실패', err)
   }
   if (!dirty) return
   e.preventDefault()
@@ -283,9 +308,15 @@ window.addEventListener('beforeunload', (e) => {
 // ---- 자동저장 / 크래시 복구 ----
 // 5분 주기로 현재 보드를 IndexedDB 스냅샷에 저장. getState는 항상 최신 board(let)를 클로저로 참조.
 // start()/복구 프롬프트 배선은 파일 하단의 부팅 초기화에서 처리(복구본 보존 순서 때문).
+let autosaveFailureNotified = false
 const autosave = new AutoSave({
   getState: () => board,
-  onError: (err) => console.warn('[autosave] 저장 실패', err),
+  onError: (err) => {
+    console.warn('[autosave] 저장 실패', err)
+    if (autosaveFailureNotified) return
+    autosaveFailureNotified = true
+    showToast('자동저장에 실패했습니다. 수동 저장을 권장합니다.')
+  },
 })
 
 // ---- 미니맵 / 스냅 / 그리드 / 투명도 ----
@@ -296,9 +327,18 @@ let gridOn = false
 
 // 잠긴 아이템 id 집합(선택 외곽선 색 구분용)
 function lockedIdSet(): Set<string> {
-  const s = new Set<string>()
-  for (const im of board.items) if (im.locked) s.add(im.id)
-  return s
+  if (
+    lockedCacheSource !== board.items ||
+    lockedCacheLength !== board.items.length ||
+    lockedCacheSeenRevision !== lockedCacheRevision
+  ) {
+    lockedCache = new Set<string>()
+    for (const im of board.items) if (im.locked) lockedCache.add(im.id)
+    lockedCacheSource = board.items
+    lockedCacheLength = board.items.length
+    lockedCacheSeenRevision = lockedCacheRevision
+  }
+  return lockedCache
 }
 
 // 투명도 슬라이더(우상단). 드래그=실시간 미리보기(첫 입력에 1회 commit), 놓으면 확정.
@@ -312,7 +352,7 @@ opacityCtl.onInput = (v) => {
     opacityCommitted = true
   }
   for (const id of ids) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     if (!im) continue
     im.opacity = v
     syncNode(im) // 이미지=alpha 직접, 노트/드로잉=update*로 반영(타입 무관)
@@ -328,7 +368,7 @@ function syncOpacityControl() {
     opacityCtl.hide()
     return
   }
-  const im = board.items.find((i) => i.id === ids[0])
+  const im = getItem(ids[0])
   opacityCtl.show(im ? im.opacity : 1)
 }
 
@@ -340,7 +380,7 @@ let styleCommitted = false // 색/슬라이더 조작 중 1회만 commit(undo 1�
 function styleTargets(): (BoardNote | BoardDrawing)[] {
   const out: (BoardNote | BoardDrawing)[] = []
   for (const id of sel.values()) {
-    const it = board.items.find((i) => i.id === id)
+    const it = getItem(id)
     if (it && !it.locked && (isNoteItem(it) || isDrawingItem(it))) out.push(it)
   }
   return out
@@ -493,7 +533,7 @@ minimap.onJump = (wx, wy) => {
 function refreshGizmo() {
   const ids = sel.values()
   if (ids.length === 1) {
-    const im = board.items.find((i) => i.id === ids[0])
+    const im = getItem(ids[0])
     if (im && !im.locked) {
       // 크롭된 이미지는 표시 크기(croppedSize)로 기즈모를 그려 선택 외곽선과 일치시킨다(bug-core P1).
       // 노트/드로잉은 측정/바운딩 박스(natural) 기준.
@@ -541,7 +581,7 @@ function fitBounds(b: { minX: number; minY: number; maxX: number; maxY: number }
   const H = host.clientHeight
   const bw = Math.max(1, b.maxX - b.minX)
   const bh = Math.max(1, b.maxY - b.minY)
-  const scale = Math.min(20, Math.max(0.05, Math.min(W / bw, H / bh) * pad))
+  const scale = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.min(W / bw, H / bh) * pad))
   const cx = (b.minX + b.maxX) / 2
   const cy = (b.minY + b.maxY) / 2
   cam.zoom = scale
@@ -572,6 +612,14 @@ function zoomReset() {
   applyCam()
 }
 
+function zoomAt(screenX: number, screenY: number, factor: number): void {
+  const newZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom * factor))
+  cam.x = screenX - (screenX - cam.x) * (newZoom / cam.zoom)
+  cam.y = screenY - (screenY - cam.y) * (newZoom / cam.zoom)
+  cam.zoom = newZoom
+  applyCam()
+}
+
 // 보드 통째 복원(열기·undo·redo 공용).
 // keepCamera=true면 현재 카메라를 유지 — undo/redo가 편집과 무관하게 화면을 점프시키지 않게 한다(bug-core P1).
 // 열기/크래시 복구는 저장된 카메라를 복원해야 자연스러우므로 기본은 복원이다.
@@ -592,17 +640,22 @@ host.addEventListener(
   (e) => {
     e.preventDefault()
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1
-    const newZoom = Math.min(20, Math.max(0.05, cam.zoom * factor))
     const rect = host.getBoundingClientRect()
     const mx = e.clientX - rect.left
     const my = e.clientY - rect.top
-    cam.x = mx - (mx - cam.x) * (newZoom / cam.zoom)
-    cam.y = my - (my - cam.y) * (newZoom / cam.zoom)
-    cam.zoom = newZoom
-    applyCam()
+    zoomAt(mx, my, factor)
   },
   { passive: false },
 )
+
+attachEditorTwoFingerGestures(host, {
+  onPan: (dx, dy) => {
+    cam.x += dx
+    cam.y += dy
+    applyCam()
+  },
+  onPinch: (factor, centerX, centerY) => zoomAt(centerX, centerY, factor),
+})
 
 // ---- 팬: 우클릭/휠클릭 드래그 (DOM 이벤트) ----
 let panning = false
@@ -693,7 +746,7 @@ scene.onPointerDown = (p: ScenePointer) => {
   }
   // 0) 크롭 모드: 대상 이미지 기준 드래그 시작점(원본픽셀) 기록
   if (cropMode && cropTargetId) {
-    const im = board.items.find((i) => i.id === cropTargetId)
+    const im = getItem(cropTargetId)
     if (im && isImageItem(im)) {
       cropDrag = { startPix: worldToPixel(im, p.world.x, p.world.y), startWorld: p.world }
       return
@@ -702,7 +755,7 @@ scene.onPointerDown = (p: ScenePointer) => {
   // 1) 변형 기즈모 핸들 우선 판정(단일 선택·비잠금)
   if (sel.size === 1) {
     const gid = sel.values()[0]
-    const gim = board.items.find((i) => i.id === gid)
+    const gim = getItem(gid)
     if (gim && !gim.locked) {
       const handles = handlePositions(gim.transform, itemDisplaySize(gim), 30 / cam.zoom)
       const hit = hitTest(p.world, handles, 9 / cam.zoom)
@@ -719,7 +772,7 @@ scene.onPointerDown = (p: ScenePointer) => {
     else if (!sel.has(p.hitId)) sel.set(expandByGroup(board.items, [p.hitId]))
     const origins = new Map<string, { x: number; y: number }>()
     for (const id of sel.values()) {
-      const img = board.items.find((i) => i.id === id)
+      const img = getItem(id)
       if (img && !img.locked) origins.set(id, { x: img.transform.x, y: img.transform.y })
     }
     const others: AABB[] = []
@@ -781,7 +834,7 @@ scene.onPointerMove = (p: ScenePointer) => {
   if (!drag) return
   if (drag.mode === 'gizmo') {
     const gd = drag // 타입 내로잉 캡처(아래 콜백/commit 이후에도 'gizmo'로 고정)
-    const im = board.items.find((i) => i.id === gd.id)
+    const im = getItem(gd.id)
     if (!im) return
     if (!gd.committed) {
       commit()
@@ -811,7 +864,7 @@ scene.onPointerMove = (p: ScenePointer) => {
       drag.committed = true
     }
     for (const [id, o] of drag.origins) {
-      const img = board.items.find((i) => i.id === id)
+      const img = getItem(id)
       if (!img) continue
       img.transform.x = o.x + dx
       img.transform.y = o.y + dy
@@ -832,7 +885,7 @@ scene.onPointerMove = (p: ScenePointer) => {
         }
         if (adj.dx !== 0 || adj.dy !== 0) {
           for (const [id, o] of drag.origins) {
-            const img = board.items.find((i) => i.id === id)
+            const img = getItem(id)
             if (!img) continue
             img.transform.x = o.x + dx + adj.dx
             img.transform.y = o.y + dy + adj.dy
@@ -857,7 +910,7 @@ scene.onPointerUp = (p: ScenePointer) => {
   // 크롭 모드: 드래그 영역을 원본픽셀 크롭으로 확정(크롭 영역은 제자리 유지)
   if (cropMode) {
     if (cropDrag && cropTargetId) {
-      const im = board.items.find((i) => i.id === cropTargetId)
+      const im = getItem(cropTargetId)
       if (im && isImageItem(im)) {
         const endPix = worldToPixel(im, p.world.x, p.world.y)
         const nc = cropRectFromDrag(cropDrag.startPix, endPix, im.natural)
@@ -928,7 +981,7 @@ async function duplicateSelected() {
   commit()
   const newIds: string[] = []
   for (const id of ids) {
-    const src = board.items.find((i) => i.id === id)
+    const src = getItem(id)
     if (!src) continue
     // 타입 무관 깊은 복사(이미지/노트/드로잉). id·z·위치만 새로 부여.
     const copy = structuredClone(src) as BoardItem
@@ -944,21 +997,21 @@ async function duplicateSelected() {
   updateMinimap()
 }
 
-function packAll() {
+async function packAll() {
   const targets = sel.size > 1 ? sel.values() : scene.allIds()
   if (targets.length < 2) return
   commit()
   const items = targets.flatMap((id) => {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     // scene-board desync로 board에 없는 id면 건너뛴다(비널 단언 제거 — bug-core P3).
     if (!im) return []
     return [{ id, w: im.natural.w * im.transform.scale, h: im.natural.h * im.transform.scale }]
   })
   const aspect = Math.max(0.1, host.clientWidth / host.clientHeight)
-  const pos = packImages(items, { aspect, padding: 16 })
+  const pos = await packImagesOffThread(items, { aspect, padding: 16 })
   const center = scene.screenToWorld(host.clientWidth / 2, host.clientHeight / 2)
   for (const id of targets) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     const p = pos.get(id)
     if (!im || !p) continue
     im.transform.x = center.x + p.x
@@ -989,7 +1042,7 @@ function flipSelected(axis: 'x' | 'y') {
   if (ids.length === 0) return
   commit()
   for (const id of ids) {
-    const img = board.items.find((i) => i.id === id)
+    const img = getItem(id)
     if (!img) continue
     if (axis === 'x') img.transform.flipX = !img.transform.flipX
     else img.transform.flipY = !img.transform.flipY
@@ -1007,7 +1060,7 @@ function groupSelected() {
   }
   commit()
   for (const id of plan.memberIds) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     if (im) im.groupId = plan.groupId
   }
   showToast(`${plan.memberIds.length}개 그룹화`, true)
@@ -1021,7 +1074,7 @@ function ungroupSelected() {
   }
   commit()
   for (const id of targets) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     if (im) delete im.groupId
   }
   showToast('그룹 해제', true)
@@ -1035,13 +1088,14 @@ function toggleLock() {
   if (ids.length === 0) return
   commit()
   const anyUnlocked = ids.some((id) => {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     return im ? !im.locked : false
   })
   for (const id of ids) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     if (im) im.locked = anyUnlocked
   }
+  markLockedCacheDirty()
   afterEdit()
   showToast(anyUnlocked ? '잠금' : '잠금 해제', true)
 }
@@ -1313,7 +1367,7 @@ function commitNoteEditor() {
   disposeNoteEditor()
   if (id) {
     // 재편집: 기존 노트 갱신(빈 텍스트면 삭제).
-    const note = board.items.find((i) => i.id === id)
+    const note = getItem(id)
     if (!note || note.type !== 'note') return
     if (text.length === 0) {
       commit()
@@ -1354,7 +1408,17 @@ function commitNoteEditor() {
     }
     commit()
     board.items.push(note)
-    void scene.addNote(note)
+    try {
+      scene.addNote(note)
+    } catch (err) {
+      console.warn('[note] 노트 렌더링 실패', err)
+      showToast('노트를 화면에 추가하지 못했습니다.')
+      scene.removeItem(note.id)
+      board.items = board.items.filter((item) => item.id !== note.id)
+      sel.clear()
+      updateMinimap()
+      return
+    }
     ensureNoteFont(note) // 웹폰트면 로드 후 재렌더(FOUT 보정)
     hint.style.display = 'none'
     sel.set([note.id])
@@ -1389,7 +1453,7 @@ function editComment() {
     showToast('댓글은 이미지 1개를 선택했을 때 가능합니다', true)
     return
   }
-  const im = board.items.find((i) => i.id === ids[0])
+  const im = getItem(ids[0])
   if (!im || !isImageItem(im)) {
     showToast('댓글은 이미지에만 달 수 있습니다', true)
     return
@@ -1443,7 +1507,7 @@ function enterCropMode() {
     showToast('크롭은 이미지 1개만 선택했을 때 가능합니다', true)
     return
   }
-  const target = board.items.find((i) => i.id === sel.values()[0])
+  const target = getItem(sel.values()[0])
   // 크롭은 이미지 전용(노트/드로잉은 비파괴 크롭 개념이 없다).
   if (target && !isImageItem(target)) {
     showToast('크롭은 이미지에만 적용할 수 있습니다', true)
@@ -1473,7 +1537,7 @@ function resetCrop() {
   if (ids.length === 0) return
   commit()
   for (const id of ids) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     if (!im || !isImageItem(im) || !im.crop) continue // 크롭은 이미지에만 존재
     delete im.crop
     scene.applyCrop(id, im)
@@ -1487,7 +1551,7 @@ function resetTransform() {
   if (ids.length === 0) return
   commit()
   for (const id of ids) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     if (!im) continue
     im.transform.scale = 1
     im.transform.rotation = 0
@@ -1502,7 +1566,7 @@ function resetTransform() {
 function alignItems(): AlignItem[] {
   const out: AlignItem[] = []
   for (const id of sel.values()) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     const a = scene.getItemAABB(id)
     if (im && a) out.push({ id, aabb: a, cx: im.transform.x, cy: im.transform.y, natural: im.natural, scale: im.transform.scale })
   }
@@ -1510,7 +1574,7 @@ function alignItems(): AlignItem[] {
 }
 function applyDeltas(deltas: Map<string, { dx: number; dy: number }>) {
   for (const [id, d] of deltas) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     if (!im) continue
     im.transform.x += d.dx
     im.transform.y += d.dy
@@ -1536,7 +1600,7 @@ function doNormalize(mode: 'width' | 'height' | 'scale' | 'area') {
   if (items.length < 2) return
   commit()
   for (const [id, sc] of normalizeSize(items, mode)) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     if (!im) continue
     im.transform.scale = sc.scale
     syncNode(im)
@@ -1681,7 +1745,7 @@ async function exportEachItems(scope: 'all' | 'sel') {
   // 이미지 아이템만 추린다(노트/드로잉은 단독 PNG 의미가 약하고 getSprite도 이미지 전용).
   const baseIds = scope === 'sel' ? sel.values() : scene.allIds()
   const ids = baseIds.filter((id) => {
-    const it = board.items.find((i) => i.id === id)
+    const it = getItem(id)
     return it != null && isImageItem(it)
   })
   if (ids.length === 0) {
@@ -1703,7 +1767,7 @@ async function exportEachItems(scope: 'all' | 'sel') {
     // 파일명: 원본 name(없으면 id) + 0패딩 순번. 같은 이름이 여러 장이어도 순번으로 구분된다.
     const pad = String(results.length).length
     results.forEach((res, i) => {
-      const im = board.items.find((it) => it.id === res.id)
+      const im = getItem(res.id)
       const baseName = (im && isImageItem(im) && im.name ? stripExt(im.name) : res.id)
       const seq = String(i + 1).padStart(pad, '0')
       downloadBlob(res.blob, withImageExt(`${baseName}-${seq}`, fmt))
@@ -1744,13 +1808,13 @@ function navigateItem(dir: 1 | -1) {
 // ---- 캔버스 최적화(정돈): 전체 자동 배치 후 전체 보기 ----
 // packAll은 선택이 2개 이상이면 선택만, 아니면 전체를 pack한다. "최적화"는 항상 전체를 정돈하는
 // 의미이므로 선택을 비운 뒤 packAll을 호출해 전체 대상이 되게 한다(packAll 내부에서 fitAll까지 수행).
-function optimizeCanvas() {
+async function optimizeCanvas() {
   if (scene.allIds().length < 2) {
     showToast('정돈할 항목이 2개 이상이어야 합니다', true)
     return
   }
   sel.clear()
-  packAll() // 전체 pack + fitAll(내부에서 호출)
+  await packAll() // 전체 pack + fitAll(내부에서 호출)
   showToast('캔버스를 정돈했습니다', true)
 }
 
@@ -1775,7 +1839,7 @@ function doArrangeSort(key: SortKey) {
   // SortItem 매핑: 표시 크기(natural × scale)와 정렬 키 필드(name/addedAt/z).
   const items: SortItem[] = []
   for (const id of targetIds) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     if (!im) continue
     const ds = itemDisplaySize(im) // 이미지=크롭 반영, 노트/드로잉=natural
     items.push({
@@ -1799,7 +1863,7 @@ function doArrangeSort(key: SortKey) {
   // 반환 중심좌표(원점 기준)를 화면 중앙으로 평행이동해 적용(packAll과 동일 방식).
   const center = scene.screenToWorld(host.clientWidth / 2, host.clientHeight / 2)
   for (const id of targetIds) {
-    const im = board.items.find((i) => i.id === id)
+    const im = getItem(id)
     const p = pos.get(id)
     if (!im || !p) continue
     im.transform.x = center.x + p.x
@@ -1916,10 +1980,17 @@ function toggleCanvasLock() {
   toolbar.setActive('window.toggleLock', canvasLocked)
   showToast(canvasLocked ? '캔버스 잠금 · 편집/이동 차단' : '캔버스 잠금 해제', true)
 }
+let shareInProgress = false
 // 웹 뷰어 링크 공유: Supabase 키가 있으면 클라우드(로그인+허용목록+서명URL)로, 없으면 LocalShareAdapter
 // (같은 브라우저 목업)로 업로드하고 viewer.html#/b/<id> 링크를 클립보드에 복사한다.
 // 다중 해상도(thumb/medium/orig) 생성·원본 src 제거는 어댑터 내부에서 수행한다(Phase 5.1/5.3, P1#4).
 async function shareWebLink() {
+  if (shareInProgress) {
+    showToast('공유 업로드가 진행 중입니다', true)
+    return
+  }
+  shareInProgress = true
+  toolbar.setDisabled('share.webLink', true)
   try {
     const adapter = getShareAdapter(location.origin + '/viewer.html')
     // 클라우드 백엔드면 로그인 필요(목업은 항상 로그인 상태로 통과).
@@ -1932,7 +2003,7 @@ async function shareWebLink() {
     // 공유 옵션(공개 여부·만료·허용 이메일)을 모달로 입력받는다(M5). 취소하면 중단.
     const opts = await openShareDialog()
     if (!opts) return
-    showToast('공유 준비 중(업로드)…', true)
+    showLoading('공유 준비 중…')
     // 이미 공유한 보드면 그 board_id를 재사용해 같은 링크를 갱신한다(중복 누적 방지).
     const prevShareId = board.board.shareId
     const { id, url } = await adapter.upload(board, {
@@ -1956,6 +2027,10 @@ async function shareWebLink() {
   } catch (e) {
     console.error('[share] 업로드 실패:', e) // 진단: F12 콘솔에 전체 에러(테이블/정책/details) 노출
     showToast(e instanceof Error ? e.message : '웹 공유 실패', true)
+  } finally {
+    shareInProgress = false
+    toolbar.setDisabled('share.webLink', false)
+    hideLoading()
   }
 }
 
@@ -2055,7 +2130,7 @@ function runAction(id: string) {
       drawGridIfOn()
       showToast(gridOn ? '그리드 켜짐' : '그리드 꺼짐', true)
       break
-    case 'view.optimize': optimizeCanvas(); break
+    case 'view.optimize': void optimizeCanvas(); break
     case 'navigate.prev': navigateItem(-1); break
     case 'navigate.next': navigateItem(1); break
     // 편집
@@ -2077,7 +2152,7 @@ function runAction(id: string) {
     case 'edit.redo': void doRedo(); break
     case 'edit.toggleLock': toggleLock(); break
     // 정렬·배치
-    case 'arrange.pack': packAll(); break
+    case 'arrange.pack': void packAll(); break
     case 'arrange.group': groupSelected(); break
     case 'arrange.ungroup': ungroupSelected(); break
     case 'arrange.alignLeft': doAlign('left'); break
@@ -2177,30 +2252,42 @@ window.addEventListener('keydown', (e) => {
 })
 
 // ---- 가져오기 공통 ----
+type ImportedImage = { url: string; size: { w: number; h: number }; name: string }
+type ImportResult = { ok: true; value: ImportedImage } | { ok: false }
+
 async function importFiles(files: File[], baseX: number, baseY: number) {
   if (files.length === 0) return
   // 원본 파일명(name)도 함께 보관 — 정렬(격자 이름순)·개별 내보내기 파일명에 쓰인다.
-  const valid: { url: string; size: { w: number; h: number }; name: string }[] = []
-  let failed = 0
-  for (let i = 0; i < files.length; i++) {
-    showLoading(files.length > 1 ? `이미지 불러오는 중… ${i + 1}/${files.length}` : '이미지 불러오는 중…')
+  const valid: ImportedImage[] = []
+  let completed = 0
+  showLoading(files.length > 1 ? `이미지 불러오는 중… 0/${files.length}` : '이미지 불러오는 중…')
+  const decoded = await mapWithConcurrency<File, ImportResult>(files, 6, async (file) => {
     try {
-      const url = await fileToDataURL(files[i])
+      const url = await blobToDataURL(file)
       // 대형 이미지는 자동 다운스케일(메모리·.refb 크기·렌더 성능 절감). 긴 변 4096px 초과분만 줄인다.
       // downscaleIfLarge가 결과 픽셀 크기를 함께 반환하므로 별도 imageSize 호출은 불필요.
-      const ds = await downscaleIfLarge(url, { maxEdge: 4096 })
+      const ds = await downscaleIfLarge(url, { maxEdge: IMAGE_MAX_EDGE })
       // 치수를 끝내 못 구한 0×0 결과는 배치하지 않는다(렌더/바운즈/pack 깨짐 방지 — bug-io P1).
       if (ds.width <= 0 || ds.height <= 0) throw new Error('이미지 크기를 확인할 수 없습니다')
-      valid.push({ url: ds.dataUrl, size: { w: ds.width, h: ds.height }, name: files[i].name })
+      return { ok: true, value: { url: ds.dataUrl, size: { w: ds.width, h: ds.height }, name: file.name } }
     } catch {
-      failed++
+      return { ok: false }
+    } finally {
+      completed += 1
+      if (files.length > 1) showLoading(`이미지 불러오는 중… ${completed}/${files.length}`)
     }
+  })
+  for (const result of decoded) {
+    if (result.ok) valid.push(result.value)
   }
+  const failed = decoded.length - valid.length
   if (valid.length > 0) {
     commit()
     for (let j = 0; j < valid.length; j++) {
       if (valid.length > 1) showLoading(`배치 중… ${j + 1}/${valid.length}`)
-      await placeImageWithSize(valid[j].url, valid[j].size, baseX + j * 30, baseY + j * 30, valid[j].name)
+      const item = valid[j]
+      if (!item) continue
+      await placeImageWithSize(item.url, item.size, baseX + j * 30, baseY + j * 30, item.name)
     }
     updateMinimap()
   }
@@ -2258,16 +2345,6 @@ async function placeImageWithSize(
   hint.style.display = 'none'
 }
 
-// ---- 유틸 ----
-function fileToDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader()
-    r.onload = () => resolve(r.result as string)
-    r.onerror = () => reject(r.error)
-    r.readAsDataURL(file)
-  })
-}
-
 // 디버그용 전역 노출
 ;(globalThis as unknown as { refboard: unknown }).refboard = {
   get board() {
@@ -2309,7 +2386,7 @@ function fileToDataURL(file: File): Promise<string> {
   exportScene,
   exportSel,
   open: openBoard,
-  getItem: (id: string) => board.items.find((i) => i.id === id),
+  getItem,
 }
 
 // ---- 부팅 초기화: 크래시 복구 → 마지막 세션 이어 열기 → 자동저장 시작 ----
@@ -2319,7 +2396,11 @@ function loadLastSessionIfAny() {
   const last = getLastSession()
   if (last && last.items.length > 0) {
     void restore(last)
-    showToast('마지막 세션을 불러왔습니다', true)
+      .then(() => showToast('마지막 세션을 불러왔습니다', true))
+      .catch((err: unknown) => {
+        console.warn('[recent] 마지막 세션 복원 실패', err)
+        showToast('마지막 세션을 불러오지 못했습니다.')
+      })
   }
 }
 void (async () => {

@@ -3,7 +3,7 @@
 // 지금은 외부 키 없이 동작·검증할 수 있는 LocalShareAdapter(localStorage 목업)를 제공한다.
 //
 // 역할 분담:
-//   - share-export.ts = 서버리스 1순위(자기완결 HTML 파일 하나로 어디서나 열기).
+//   - 레거시 자기완결 HTML 공유는 현재 클라우드/해시 뷰어 경로로 대체됨.
 //   - share-adapter.ts = "짧은 링크로 공유" 2순위(업로드 → URL → 모바일/뷰어에서 load로 복원).
 //   두 경로 모두 board.ts의 BoardState/serialize/deserialize를 단일 진실로 공유한다.
 

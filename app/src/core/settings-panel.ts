@@ -31,6 +31,8 @@ import {
   rebind,
   resetBindings,
 } from './keymap'
+import { MODAL_Z_INDEX } from './constants'
+import { createFocusTrap, type FocusTrap } from './modal'
 
 // ---- 탭 식별자 ----
 export type SettingsTab = 'theme' | 'keys'
@@ -75,6 +77,7 @@ let activeTab: SettingsTab = 'theme'
 // 닫을 때 정확히 해제하기 위한 참조.
 let onDocKeydown: ((e: KeyboardEvent) => void) | null = null
 let unsubscribeTheme: (() => void) | null = null
+let focusTrap: FocusTrap | null = null
 
 // 재바인딩 캡처 모드 상태. 활성 시 다음 keydown 한 번을 가로채 해당 액션에 바인딩한다.
 let capturingActionId: string | null = null
@@ -115,6 +118,8 @@ export function closeSettings(): void {
     unsubscribeTheme()
     unsubscribeTheme = null
   }
+  focusTrap?.dispose()
+  focusTrap = null
   root.remove()
   root = null
   bodyEl = null
@@ -134,7 +139,7 @@ function buildDom(): void {
   backdrop.style.cssText = [
     'position:fixed',
     'inset:0',
-    'z-index:10000',
+    `z-index:${MODAL_Z_INDEX}`,
     'display:flex',
     'justify-content:center',
     'align-items:flex-start',
@@ -235,6 +240,8 @@ function buildDom(): void {
 
   root = backdrop
   bodyEl = body
+  focusTrap = createFocusTrap(backdrop)
+  focusTrap.activate()
 
   // 초기 탭 반영(버튼 활성 표시 + 본문 렌더).
   applyTabButtonStyles()
@@ -692,6 +699,11 @@ function handleKeydown(e: KeyboardEvent): void {
     e.preventDefault()
     e.stopPropagation()
     closeSettings()
+    return
+  }
+  if (e.key === 'Tab') {
+    e.stopPropagation()
+    focusTrap?.handleKeydown(e)
     return
   }
   // 그 외 키는 폼 요소가 정상 동작하도록 두되, 전역 단축키로 전파만 차단.

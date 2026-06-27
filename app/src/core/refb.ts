@@ -110,7 +110,7 @@ function encodeDataUrl(bytes: Uint8Array, mime: string): string {
 // content-type 헤더는 못 믿는다 — Cloudflare Pages SPA fallback이 index.html(HTML)을 돌려주거나
 // 서버가 image/png로 거짓 라벨링해도, 바이트 시그니처는 속일 수 없다. 래스터(PNG/JPEG/GIF/WebP/BMP)와
 // SVG(텍스트 '<?xml'/'<svg')는 허용하고, HTML('<!doctype'/'<html' 등)·일반 텍스트는 거부한다.
-function looksLikeImageBytes(b: Uint8Array): boolean {
+export function looksLikeImageBytes(b: Uint8Array): boolean {
   if (!b || b.length < 4) return false
   if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return true // PNG
   if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return true // JPEG
@@ -135,7 +135,7 @@ function looksLikeImageBytes(b: Uint8Array): boolean {
 }
 
 // 매직바이트로 image mime 추정(이미지가 아니면 null). data URL 헤더 재구성용.
-function sniffImageMime(b: Uint8Array): string | null {
+export function sniffImageMime(b: Uint8Array): string | null {
   if (b.length >= 4 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png'
   if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg'
   if (b.length >= 4 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif'
