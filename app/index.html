@@ -13,14 +13,47 @@
       #app { position: fixed; inset: 0; }
       /* 빈 캔버스 안내 (이미지가 들어오면 숨김) */
       #hint {
-        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 14px;
         color: var(--rb-text-dim, #777); font: 14px system-ui, sans-serif; pointer-events: none; user-select: none;
+        text-align: center;
+        padding: 24px;
+        white-space: pre-line;
       }
+      #hint .hint-text {
+        max-width: min(92vw, 560px);
+      }
+      #hint .hint-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+        pointer-events: auto;
+      }
+      #hint button {
+        padding: 10px 14px;
+        border: 0;
+        border-radius: 8px;
+        background: #3d3d3d;
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+      #hint button:hover { background: #4a4a4a; }
+      #hint button:focus-visible { outline: 2px solid #4aa3ff; outline-offset: 2px; }
     </style>
   </head>
   <body>
     <div id="app"></div>
-    <div id="hint">이미지를 이 창에 끌어다 놓으세요 &nbsp;·&nbsp; 휠 = 줌 &nbsp;·&nbsp; 우클릭 드래그 = 이동 &nbsp;·&nbsp; Ctrl+V = 붙여넣기</div>
+    <div id="hint">
+      <div class="hint-text">이미지를 이 창에 끌어다 놓으세요
+휠 = 줌 · 우클릭 드래그 = 이동 · Ctrl+V = 붙여넣기
+터치에서는 아래 버튼을 사용할 수 있습니다.</div>
+      <div class="hint-actions">
+        <button id="hint-import" type="button">이미지 가져오기</button>
+        <button id="hint-open" type="button">보드 열기</button>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -64,6 +64,8 @@ import { openConfirmDialog, openPromptDialog } from './core/dialog'
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
 const hint = document.getElementById('hint') as HTMLElement
+const hintImportButton = document.getElementById('hint-import') as HTMLButtonElement | null
+const hintOpenButton = document.getElementById('hint-open') as HTMLButtonElement | null
 
 // board는 undo/redo·열기로 통째 교체될 수 있어 let.
 let board: BoardState = createEmptyBoard()
@@ -103,6 +105,13 @@ const toolbar = createToolbar({
   onRenameBoard: () => {
     void renameBoard()
   },
+})
+
+hintImportButton?.addEventListener('click', () => {
+  void openImageFiles()
+})
+hintOpenButton?.addEventListener('click', () => {
+  void openBoard()
 })
 
 async function renameBoard(): Promise<void> {
