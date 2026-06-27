@@ -111,18 +111,33 @@ RefBoard/
 
 ---
 
-## 5. 현재 git 상태 (인계 시점)
+## 5. 현재 상태 & 작업 경위
 
-- 브랜치: **`main`**
-- 미커밋 변경: **`체크리스트.md` 1건만**(이번에 Phase 7 백로그를 추가한 것 — 커밋해도 되는 문서 변경). 그 외 working tree 깨끗.
+### 5.1 git 상태 (인계 시점, 2026-06-27)
+- 브랜치 **`main`**, **origin/main과 동기화됨**(push 완료). working tree 깨끗(미커밋 0).
 - 최근 커밋:
   ```
+  22d6431 docs: Codex 인계 문서 + Phase 7 개선 백로그 정리   ← 이 인계 문서
   40c2052 fix: 공유 데이터 손상 origin 근본 차단 (.refb 매직바이트 검증)
   84c61ac fix: 공유 데이터 손상 근본 차단 (디코드 검증 3중 가드)
   07826ab fix: 불러온 보드 재공유 시 원본 이미지 손실 (attachSrcSets)
   8fb34a1 feat: 내 공유 보드 열기/편집 불러오기 (관리 패널)
-  44a8336 feat: 공유 중복 방지 + 내 보드 관리 패널 + 상태바 보드 정보
   ```
+
+### 5.2 작업 경위 타임라인 (왜 지금 이 상태인지)
+- **기획**: `기능명세서.md`로 PureRef 조사 → 설계 확정 — Tauri 2 + PixiJS + **`core/` 공유 엔진** · `.refb` ZIP 포맷 · 웹공유=클라우드 업로드→링크→모바일 뷰어(**킬러 기능**).
+- **Phase 1 (캔버스 코어 MVP)**: 무한 캔버스 · 가져오기(드롭/붙여넣기/파일) · 선택 · 이동 · 자동 패킹(Skyline) · `.refb` 저장/열기 · Undo/Redo.
+- **Phase 2 (편집 도구)**: 변형 기즈모 · 비파괴 크롭 · 정렬/분배/정규화 · z순서 · 그룹 · 투명도/잠금 · 그리드/스냅 · 텍스트 노트 · 드로잉 · 색 스포이드.
+- **Phase 3 (파일·내보내기)**: `.refb` ZIP · IndexedDB 자동저장/크래시 복구 · 내보내기(PNG/JPG/BMP, 씬/선택/개별) · 최근 파일.
+- **Phase 4 (Tauri 셸)**: 윈도우 모드(항상위/아래·클릭스루·불투명도·타이틀바·캔버스잠금) · 테마 · 재바인딩 단축키 · 커맨드 팔레트 · 대량 이미지 가상화.
+- **Phase 5 (웹 공유 — 차별점)**: **Supabase 실배포**(`refboard-e0m.pages.dev`, CF Pages 자동연동) · 업로드/단축링크 · 읽기전용 뷰어 · 라이트박스 · PWA · 다중해상도(thumb/medium WebP) · 권한(공개/만료/이메일).
+- **Phase 6 (품질·마감)**: **버그 감사 2회** — 06-18 팀오케 59건(→24 수정) · 06-21 전수 9건(→전건). 성능(applyCam rAF 코얼레싱 등) · 접근성 · README 단축키표.
+- **2026-06-21 P1 기능 배치**(`5cb8b6a` 등): 중앙정렬 · 면적 정규화 · 개별 내보내기(BMP) · 항목 순회 · 스포이드 · 최근 파일 UI · 기준별 격자 정렬.
+- **2026-06-26 공유 왕복 UX + ★데이터 손상 근본 수정**(`84c61ac`+`40c2052`): 클라우드 보드 재공유 시 `src`가 손상되던 문제를 **매직바이트 검증**으로 차단(상세 §4-2). 시크릿창 실증·검증 완료.
+- **2026-06-26 개선 백로그 4차원 감사** → **2026-06-27 `체크리스트.md` Phase 7로 통합**(17항목, 전부 미착수).
+- **2026-06-27 이 인계 문서 작성**(`22d6431`) — Claude Code 토큰 소진으로 Codex 인계.
+
+> 더 깊은 근거: Phase별 상세=`체크리스트.md`, 감사=`docs/bug-audit-2026-06-21.md`·`docs/bug-audit-phase6-2026-06-18.md`, 공유 설계=`docs/share-backend-design.md`.
 
 ---
 
@@ -171,6 +186,49 @@ RefBoard/
 2. 구현. 코드 스타일은 **주변 기존 코드 관습**을 따른다(한국어 주석).
 3. **검증**: `cd app && npm run build`(tsc+vite 통과 0 에러) → 필요시 `npm run dev`로 동작 확인.
 4. `체크리스트.md` 해당 항목 `[ ]`→`[x]`(또는 `[~]`) 갱신.
-5. 커밋은 **사용자 요청 시에만**, `fkrn75@gmail.com` 아이덴티티로(§4-1). push=자동 배포임을 유념.
+5. 커밋·푸시는 **사용자 요청 시에만** — 구체 절차는 §9.
+
+---
+
+## 9. Git 커밋·푸시 실전 절차 (복붙용)
+
+> 환경: Windows / PowerShell. repo 루트 = `C:\Users\hong\RefBoard`(코드는 그 아래 `app/`, **git 명령은 repo 어디서나 가능**).
+
+```powershell
+cd C:\Users\hong\RefBoard
+
+# 1) 아이덴티티 확인 — 공개 repo는 반드시 fkrn75@gmail.com (전역 config는 회사메일이라 분리됨)
+git config user.email          # 기대값: fkrn75@gmail.com
+# 비어있거나 다르면 (repo 로컬에만 설정):
+# git config user.email "fkrn75@gmail.com"
+# git config user.name  "fkrn75"
+
+# 2) 스테이징 — 한글 파일명(체크리스트.md·기능명세서.md) 인코딩 이슈 회피 위해 -A 권장
+git add -A
+git status --short             # 의도한 파일만 올라갔는지 반드시 확인
+
+# 3) 커밋 — 멀티라인은 PowerShell single-quote here-string (@'...'@), 닫는 '@는 반드시 컬럼0
+git commit -m @'
+<타입>: <한 줄 요약>
+
+- 변경 요점 1
+- 변경 요점 2
+'@
+
+# 4) 푸시 = Cloudflare Pages 자동 재배포 → 사용자 확인 후에만
+git push origin main
+```
+
+**커밋 타입 관습**(기존 로그 따름): `feat:` 기능 · `fix:` 버그 · `docs:` 문서 · `refactor:` 리팩터 · `chore:` 잡무. 메시지는 한국어.
+
+**주의/함정**:
+- **푸시 = 배포**: push하면 `refboard-e0m.pages.dev`가 자동 재배포된다. `app/` 코드 변경이면 사이트에 실제 반영, 문서(`docs/`·`*.md`)만이면 사이트 동작은 동일. **무조건 사용자 확인 후 push.**
+- `.gitignore`에 `node_modules`·`dist`·`src-tauri/target`이 있음 → 빌드 산출물은 안 올라감. 그래도 push 전 `git status`로 대용량/의도외 파일 점검.
+- "`LF will be replaced by CRLF`" 경고는 Windows 줄바꿈 정규화로 **무해**(무시).
+- 한글 파일명을 경로 인자로 직접 주면(`git add 체크리스트.md`) 셸 인코딩으로 깨질 수 있음 → `git add -A`가 안전.
+- **커밋 전 검증**: `cd app && npm run build`로 tsc+vite 0 에러 확인 후 커밋(린터·테스트가 없으므로 빌드가 1차 안전망).
+- Codex CLI는 git repo 안(여기 해당)에서 실행하면 됨 — `--skip-git-repo-check` 불필요.
+
+---
 
 — 끝. 막히면 `체크리스트.md` Phase 7과 위 §4 불변식을 다시 확인할 것.
