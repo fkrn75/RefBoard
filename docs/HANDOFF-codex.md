@@ -257,6 +257,13 @@ git push origin main
 - `deserialize`는 **선택 필드를 요구하지 말 것**(구버전 `.refb` 하위호환). 기존 `board.test.ts` 전부 + 신규 케이스 통과 유지.
 - 검증: `cd app && npm run test && npm run build` 0 에러. 커밋 아이덴티티 `fkrn75@gmail.com`(§9).
 
+## 10.5 Codex 후속 반영 (2026-06-28)
+- `main.ts`는 `note-editor.ts`와 `cursor-reporter.ts`를 분리해 입력 셸 일부를 덜어냈다. 아직 남은 분리는 `pointer-input`/`drawing-tool`/`action-dispatcher`/`share-io` 쪽이다.
+- `share-dialog.ts`는 `dialog-shell.ts`를 재사용하도록 정리했다.
+- `viewer/lightbox.ts`는 터치 팬/핀치 제스처를 받도록 바꿨고, `viewer/main.ts`의 만료 화면에는 재확인 버튼을 추가했다.
+- `autosave.ts`는 BroadcastChannel + ts 비교로 다중탭 자동저장 충돌을 피하도록 보강했다.
+- 최신 상태 기준 SSOT는 `체크리스트.md`다. 남은 건 7.3의 God-file 분리뿐이다.
+
 ---
 
 — 끝. 막히면 `체크리스트.md` Phase 7과 위 §4 불변식을 다시 확인할 것.

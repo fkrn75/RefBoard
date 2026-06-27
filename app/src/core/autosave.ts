@@ -47,6 +47,9 @@ export class AutoSave {
   private readonly getState: () => BoardState
   private readonly onSaved?: () => void
   private readonly onError?: (e: unknown) => void
+  private readonly tabId: string
+  private readonly channel: BroadcastChannel | null
+  private lastObservedRemoteTs = 0
 
   // setInterval 핸들. 미동작 시 null. (브라우저 환경이라 number 타입)
   private timer: number | null = null
@@ -58,6 +61,19 @@ export class AutoSave {
     this.getState = opts.getState
     this.onSaved = opts.onSaved
     this.onError = opts.onError
+    this.tabId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+    this.channel = typeof globalThis.BroadcastChannel !== 'undefined' ? new BroadcastChannel('refboard.autosave') : null
+    if (this.channel) {
+      this.channel.onmessage = (event: MessageEvent) => {
+        const data = event.data as unknown
+        if (!data || typeof data !== 'object') return
+        const msg = data as { tabId?: unknown; ts?: unknown }
+        if (msg.tabId === this.tabId) return
+        if (typeof msg.ts === 'number' && msg.ts > this.lastObservedRemoteTs) {
+          this.lastObservedRemoteTs = msg.ts
+        }
+      }
+    }
   }
 
   // 주기적 자동저장 시작. 이미 동작 중이면 기존 타이머를 정리하고 다시 건다(중복 방지).
@@ -105,12 +121,27 @@ export class AutoSave {
       board: json,
     }
 
-    // 직전 쓰기에 이어 붙여 순차 실행. catch로 체인이 끊기지 않게 흡수한다.
-    this.writeChain = this.writeChain.then(
-      () => this.persist(snapshot),
-      () => this.persist(snapshot), // 직전 실패와 무관하게 이번 저장은 시도
-    )
-    return this.writeChain
+    return this.readSnapshot()
+      .then((current) => {
+        const currentTs = current?.ts ?? 0
+        if (currentTs > snapshot.ts || this.lastObservedRemoteTs > snapshot.ts) {
+          this.onError?.(new Error('다른 탭의 자동저장본이 더 최신입니다'))
+          return
+        }
+
+        // 직전 쓰기에 이어 붙여 순차 실행. catch로 체인이 끊기지 않게 흡수한다.
+        this.writeChain = this.writeChain.then(
+          () => this.persist(snapshot),
+          () => this.persist(snapshot), // 직전 실패와 무관하게 이번 저장은 시도
+        )
+        return this.writeChain.then(() => {
+          if (snapshot.ts > this.lastObservedRemoteTs) this.lastObservedRemoteTs = snapshot.ts
+          this.channel?.postMessage({ tabId: this.tabId, ts: snapshot.ts })
+        })
+      })
+      .catch((e) => {
+        this.onError?.(e)
+      })
   }
 
   // 크래시 복구용 스냅샷이 존재하는지 여부.

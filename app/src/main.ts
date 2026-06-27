@@ -60,6 +60,8 @@ import { getShareAdapter } from './core/supabase-share'
 import { openShareDialog } from './core/share-dialog'
 import { openBoardManager } from './core/board-manager'
 import { openConfirmDialog, openPromptDialog } from './core/dialog'
+import { createNoteEditor } from './core/note-editor'
+import { createCursorReporter } from './core/cursor-reporter'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -106,6 +108,7 @@ const toolbar = createToolbar({
     void renameBoard()
   },
 })
+const cursorReporter = createCursorReporter((cursor) => toolbar.updateStatus({ cursor }))
 
 hintImportButton?.addEventListener('click', () => {
   void openImageFiles()
@@ -163,7 +166,7 @@ function setActiveTool(tool: ActiveTool) {
   if (activeTool === tool) return
   // 진행 중이던 드로잉/텍스트 편집은 도구 전환 시 정리(취소).
   cancelDrawing()
-  commitNoteEditor() // 편집 중 텍스트가 있으면 확정 후 전환
+  noteEditor.commit() // 편집 중 텍스트가 있으면 확정 후 전환
   activeTool = tool
   for (const t of Object.keys(TOOL_ACTION_IDS) as ActiveTool[]) {
     toolbar.setActive(TOOL_ACTION_IDS[t], t === tool)
@@ -692,7 +695,7 @@ host.addEventListener('pointermove', (e) => {
   last = { x: e.clientX, y: e.clientY }
   applyCam()
   const rect = host.getBoundingClientRect()
-  toolbar.updateStatus({ cursor: scene.screenToWorld(e.clientX - rect.left, e.clientY - rect.top) })
+  cursorReporter.report(scene.screenToWorld(e.clientX - rect.left, e.clientY - rect.top))
 })
 host.addEventListener('pointerup', (e) => {
   if (panning) {
@@ -708,7 +711,7 @@ host.addEventListener('dblclick', (e) => {
     const w = scene.screenToWorld(e.clientX - rect.left, e.clientY - rect.top)
     const note = noteAtWorld(w.x, w.y)
     if (note && !note.locked) {
-      openNoteEditor({ x: note.transform.x, y: note.transform.y }, note)
+      noteEditor.open({ x: note.transform.x, y: note.transform.y }, note)
       return
     }
   }
@@ -745,7 +748,7 @@ scene.onPointerDown = (p: ScenePointer) => {
   // 0a) 활성 도구가 'select'가 아니면 도구별 동작으로 가로챈다(기존 선택/이동/기즈모로 진행하지 않음).
   if (activeTool === 'text') {
     // 텍스트 도구: 클릭 지점에 입력기 띄움(중심=클릭 월드좌표).
-    openNoteEditor(p.world)
+    noteEditor.open(p.world)
     return
   }
   if (activeTool === 'eraser') {
@@ -812,7 +815,7 @@ scene.onPointerDown = (p: ScenePointer) => {
 }
 
 scene.onPointerMove = (p: ScenePointer) => {
-  toolbar.updateStatus({ cursor: p.world })
+  cursorReporter.report(p.world)
   // 드로잉 도구: 드래그 중 점 수집 + 미리보기.
   if (drawState) {
     if (drawState.tool === 'pen') drawState.points.push({ x: p.world.x, y: p.world.y })
@@ -1287,184 +1290,21 @@ async function pickColorAt(p: ScenePointer) {
   }
 }
 
-// ---- 텍스트 노트 ----
-// 캔버스 위에 DOM <textarea>를 띄워 입력받고, 확정 시 measureNote로 natural을 구해 BoardNote를 만든다.
-// editingNoteId가 있으면 "기존 노트 재편집", 없으면 "새 노트 생성"이다.
-let noteEditor: HTMLTextAreaElement | null = null
-let editingNoteId: string | null = null
-let noteEditorWorld = { x: 0, y: 0 } // 새 노트의 배치 중심(월드)
-
-// 텍스트 편집기를 연다. world=배치 중심(월드), existing=재편집 대상(없으면 신규).
-function openNoteEditor(world: { x: number; y: number }, existing?: BoardNote) {
-  commitNoteEditor() // 다른 편집기가 떠 있으면 먼저 확정
-  editingNoteId = existing ? existing.id : null
-  noteEditorWorld = world
-  const fontSize = existing ? existing.fontSize : TEXT_FONT_SIZE
-  const color = existing ? existing.color : TEXT_COLOR
-  const family = existing ? existing.fontFamily ?? TEXT_FONT_FAMILY : TEXT_FONT_FAMILY
-  const ta = document.createElement('textarea')
-  ta.value = existing ? existing.text : ''
-  ta.spellcheck = false
-  ta.rows = 1
-  // 화면 좌표로 배치(중심 기준이므로 좌상단으로 환산은 입력 후 measure 때 처리 — 여기선 클릭점 부근).
-  const sp = worldToScreen(world.x, world.y)
-  // 화면상 폰트크기 = fontSize * zoom. 캔버스 텍스트와 시각적으로 일치시킨다.
-  const screenFont = Math.max(8, fontSize * cam.zoom)
-  ta.style.cssText = [
-    'position:absolute',
-    `left:${sp.x}px`,
-    `top:${sp.y}px`,
-    'transform:translate(-50%,-50%)', // 클릭점을 중심에 맞춤(노트 anchor=0.5와 동일 감각)
-    'z-index:60',
-    'margin:0',
-    'padding:2px 4px',
-    'border:1px dashed var(--rb-accent, #4aa3ff)',
-    'border-radius:4px',
-    'background:rgba(0,0,0,.35)',
-    `color:${color}`,
-    `font:${screenFont}px ${family}`,
-    'line-height:1.2',
-    'white-space:pre',
-    'overflow:hidden',
-    'resize:none',
-    'min-width:1ch',
-    'outline:none',
-    'caret-color:var(--rb-accent, #4aa3ff)',
-  ].join(';')
-  host.appendChild(ta)
-  noteEditor = ta
-  // 입력에 맞춰 textarea 폭/높이 자동 확장(시각적 편집 편의).
-  const autosize = () => {
-    ta.style.width = 'auto'
-    ta.style.height = 'auto'
-    ta.style.width = Math.max(ta.scrollWidth + 4, 16) + 'px'
-    ta.style.height = ta.scrollHeight + 'px'
-  }
-  ta.addEventListener('input', autosize)
-  // Enter=확정(줄바꿈은 Shift+Enter), Esc=취소.
-  ta.addEventListener('keydown', (e) => {
-    e.stopPropagation() // 캔버스 단축키로 새지 않게(입력 필드 보호는 window keydown에도 있지만 이중 안전).
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      commitNoteEditor()
-    } else if (e.key === 'Escape') {
-      e.preventDefault()
-      cancelNoteEditor()
-    }
-  })
-  // 포커스 잃으면 확정(다른 곳 클릭 시 자연스럽게 마무리).
-  ta.addEventListener('blur', () => commitNoteEditor())
-  // 재편집이면 해당 노트의 노드를 잠시 숨겨 편집 중 이중 표시를 막는다.
-  // 노트는 Text 노드라 getSprite(이미지 전용)는 undefined → getNode(타입무관)로 실제 숨김 처리.
-  if (existing) {
-    const s = scene.getNode(existing.id)
-    if (s) s.visible = false
-  }
-  setTimeout(() => {
-    ta.focus()
-    autosize()
-  }, 0)
-}
-
-// 편집기를 닫고 정리한다(스프라이트 재표시 포함).
-function disposeNoteEditor() {
-  if (!noteEditor) return
-  const ed = noteEditor
-  noteEditor = null
-  ed.remove()
-  if (editingNoteId) {
-    // 숨김 때와 대칭으로 getNode 사용(Text 노드라 getSprite는 undefined → 재표시 안 됨).
-    const s = scene.getNode(editingNoteId)
-    if (s) s.visible = true
-  }
-  editingNoteId = null
-}
-
-// 텍스트 입력을 확정한다. 빈 문자열이면 (신규는 생성 안 함 / 기존은 삭제).
-function commitNoteEditor() {
-  if (!noteEditor) return
-  const text = noteEditor.value.replace(/\s+$/g, '') // 끝 공백/개행 정리
-  const id = editingNoteId
-  disposeNoteEditor()
-  if (id) {
-    // 재편집: 기존 노트 갱신(빈 텍스트면 삭제).
-    const note = getItem(id)
-    if (!note || note.type !== 'note') return
-    if (text.length === 0) {
-      commit()
-      scene.removeItem(id)
-      const idx = board.items.findIndex((i) => i.id === id)
-      if (idx >= 0) board.items.splice(idx, 1)
-      normalizeZ(board.items)
-      syncZIndex()
-      sel.clear()
-      updateMinimap()
-      if (board.items.length === 0) hint.style.display = ''
-      return
-    }
-    if (text === note.text) return // 변경 없음 → 히스토리 적재 안 함
-    commit()
-    note.text = text
-    // updateNote가 다시 그린 실제 측정 크기를 돌려주므로 그 값으로 natural을 맞춘다(측정 일원화).
-    const m = scene.updateNote(note)
-    if (m) note.natural = m
-    else note.natural = scene.measureNote(text, note.fontSize, note.color, note.fontFamily)
-    afterEdit()
-  } else {
-    // 신규: 빈 텍스트는 무시.
-    if (text.length === 0) return
-    const natural = scene.measureNote(text, TEXT_FONT_SIZE, TEXT_COLOR, TEXT_FONT_FAMILY)
-    const note: BoardNote = {
-      id: genId(),
-      type: 'note',
-      text,
-      fontSize: TEXT_FONT_SIZE,
-      fontFamily: TEXT_FONT_FAMILY,
-      color: TEXT_COLOR,
-      natural,
-      transform: { x: noteEditorWorld.x, y: noteEditorWorld.y, scale: 1, rotation: 0 },
-      opacity: 1,
-      locked: false,
-      z: board.items.length,
-    }
-    commit()
-    board.items.push(note)
-    try {
-      scene.addNote(note)
-    } catch (err) {
-      console.warn('[note] 노트 렌더링 실패', err)
-      showToast('노트를 화면에 추가하지 못했습니다.')
-      scene.removeItem(note.id)
-      board.items = board.items.filter((item) => item.id !== note.id)
-      sel.clear()
-      updateMinimap()
-      return
-    }
-    ensureNoteFont(note) // 웹폰트면 로드 후 재렌더(FOUT 보정)
-    hint.style.display = 'none'
-    sel.set([note.id])
-    updateMinimap()
-  }
-}
-
-// 텍스트 편집 취소(신규=버림, 기존=원본 유지).
-function cancelNoteEditor() {
-  disposeNoteEditor()
-}
-
-// 웹폰트로 만든 노트는 폰트 로드 전이면 폴백으로 렌더됐을 수 있다(PIXI.Text는 생성 시점 글꼴로 고정).
-// 해당 글꼴 로드 완료 후 한 번 더 재측정/재렌더해 FOUT을 보정한다(generic 폰트는 즉시 resolve).
-function ensureNoteFont(note: BoardNote) {
-  if (!note.fontFamily) return
-  document.fonts
-    .load(`${note.fontSize}px ${note.fontFamily}`)
-    .then(() => {
-      const m = scene.updateNote(note)
-      if (m) note.natural = m
-      if (sel.values().includes(note.id)) afterEdit()
-    })
-    .catch(() => {})
-}
+const noteEditor = createNoteEditor({
+  host,
+  scene,
+  board,
+  sel,
+  genId,
+  commit,
+  afterEdit,
+  updateMinimap,
+  showToast,
+  hintEl: hint,
+  getTextDefaults: () => ({ color: TEXT_COLOR, fontSize: TEXT_FONT_SIZE, fontFamily: TEXT_FONT_FAMILY }),
+  worldToScreen: (world) => worldToScreen(world.x, world.y),
+  getZoom: () => cam.zoom,
+})
 
 // ---- 댓글(이미지에 부착하는 메모) ----
 async function editComment() {
@@ -2179,7 +2019,7 @@ function runAction(id: string) {
     // 편집
     case 'edit.selectAll': sel.set(scene.allIds()); break
     case 'edit.escape':
-      if (noteEditor) cancelNoteEditor() // 텍스트 편집 중 → 취소
+      if (noteEditor.isOpen()) noteEditor.cancel() // 텍스트 편집 중 → 취소
       else if (drawState) cancelDrawing() // 드로잉 드래그 중 → 취소
       else if (cropMode) exitCropMode()
       else if (activeTool !== 'select') setActiveTool('select') // 도구 사용 중 → 선택 도구로 복귀

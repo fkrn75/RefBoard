@@ -254,6 +254,16 @@ function showCenter(message: string, actions: HTMLElement[] = []): void {
   host.appendChild(wrap)
 }
 
+function makeCenterButton(label: string, onClick: () => void): HTMLButtonElement {
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.textContent = label
+  btn.style.cssText =
+    'padding:9px 14px;border-radius:8px;border:0;background:#444;color:#fff;cursor:pointer;font-size:14px'
+  btn.addEventListener('click', onClick)
+  return btn
+}
+
 // 로그인 화면(구글 OAuth + 이메일 매직링크 폴백).
 function showLoginScreen(adapter: ReturnType<typeof getShareAdapter>): void {
   const google = document.createElement('button')
@@ -324,7 +334,8 @@ async function boot(): Promise<void> {
     if (reason === 'auth-required') showLoginScreen(adapter)
     else if (reason === 'forbidden')
       showCenter('이 보드에 접근할 권한이 없습니다.\n보드 주인에게 초대를 요청하세요.')
-    else if (reason === 'expired') showCenter('만료된 공유 링크입니다.')
+    else if (reason === 'expired')
+      showCenter('만료된 공유 링크입니다.', [makeCenterButton('다시 확인', () => location.reload())])
     else showCenter('공유된 보드를 찾을 수 없습니다.')
   }
   void registerServiceWorker() // PWA(오프라인 캐싱) — 미지원/실패 시 조용히 패스
