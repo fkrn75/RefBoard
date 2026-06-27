@@ -254,6 +254,10 @@ function fmtZoom(z: number): string {
   return (Number.isFinite(z) ? Math.round(z * 100) : 100) + '%'
 }
 
+export function formatToolbarCursor(cursor: ToolbarStatus['cursor']): string {
+  return cursor ? `${fmtCoord(cursor.x)}, ${fmtCoord(cursor.y)}` : '—'
+}
+
 // ---- 공개 API ----
 
 // 툴바 + 상태바를 생성해 mount(기본 document.body) 위에 얹고, 제어 핸들을 반환한다.
@@ -371,9 +375,7 @@ export function createToolbar(opts: ToolbarOptions): ToolbarHandle {
     shareBadge.textContent = sh === 'public' ? '공개' : sh === 'private' ? '비공개' : '로컬'
     shareBadge.dataset.share = sh
     zoomStat.val.textContent = fmtZoom(state.zoom)
-    cursorStat.val.textContent = state.cursor
-      ? `${fmtCoord(state.cursor.x)}, ${fmtCoord(state.cursor.y)}`
-      : '—'
+    cursorStat.val.textContent = formatToolbarCursor(state.cursor)
     selStat.val.textContent = String(state.selCount)
     totalStat.val.textContent = String(state.total)
   }

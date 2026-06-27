@@ -673,6 +673,8 @@ host.addEventListener('pointermove', (e) => {
   cam.y += e.clientY - last.y
   last = { x: e.clientX, y: e.clientY }
   applyCam()
+  const rect = host.getBoundingClientRect()
+  toolbar.updateStatus({ cursor: scene.screenToWorld(e.clientX - rect.left, e.clientY - rect.top) })
 })
 host.addEventListener('pointerup', (e) => {
   if (panning) {
@@ -792,6 +794,7 @@ scene.onPointerDown = (p: ScenePointer) => {
 }
 
 scene.onPointerMove = (p: ScenePointer) => {
+  toolbar.updateStatus({ cursor: p.world })
   // 드로잉 도구: 드래그 중 점 수집 + 미리보기.
   if (drawState) {
     if (drawState.tool === 'pen') drawState.points.push({ x: p.world.x, y: p.world.y })
