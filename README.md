@@ -18,6 +18,7 @@
 - ✅ 저장/열기 (`.refb` ZIP 포맷) · 자동저장 · 최근 파일 열기
 - ✅ Tauri 2 데스크탑 셸 · 웹 공유 (Supabase 업로드 → 링크 → 모바일 읽기 전용 뷰어)
 - ✅ 텍스트 노트 (색·크기·글꼴) · 펜/도형 드로잉 · 이미지 댓글
+- ✅ Vitest 단위 테스트 · 이미지 매직바이트/보드 직렬화 회귀 가드
 - ✅ 커맨드 팔레트 (`Ctrl+Shift+P`) · 재바인딩 가능한 단축키
 - ⬜ URL 스크랩 · 누락 이미지 Relink · 미니맵/성능모드 확장 등 — 진행 중
 
@@ -134,6 +135,7 @@
 - **데스크탑**: Tauri 2 + Vite + TypeScript
 - **렌더링**: PixiJS (WebGL) — 무한 캔버스 · 수백 장 이미지 대응
 - **웹 공유**: Supabase(스토리지·인증·RLS) + 읽기 전용 웹 뷰어(`viewer.html`)
+- **테스트**: Vitest (`npm run test`)
 
 핵심 설계: 렌더링을 웹 기술로 통일해 **데스크탑 앱과 웹 뷰어가 같은 코어(`src/core/`)를 공유**합니다.
 
@@ -143,6 +145,8 @@
 cd app
 npm install
 npm run dev        # http://localhost:1420
+npm run test       # Vitest 단위 테스트
+npm run build      # 프로덕션 빌드 + 서비스 워커 스탬프
 ```
 
 ## 구조
