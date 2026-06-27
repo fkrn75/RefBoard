@@ -5,6 +5,7 @@
 import type { ShareAdapter, BoardSummary } from './share-adapter'
 import { MODAL_Z_INDEX } from './constants'
 import { createFocusTrap } from './modal'
+import { openConfirmDialog } from './dialog'
 
 // 동시에 하나만 — 이미 떠 있으면 무시(중복 모달 방지).
 let openRoot: HTMLDivElement | null = null
@@ -218,8 +219,13 @@ export function openBoardManager(options: BoardManagerOptions): void {
     const delBtn = makeIconButton('🗑', '삭제')
     delBtn.style.color = '#e06c6c'
     delBtn.addEventListener('click', async () => {
-      // 되돌릴 수 없는 동작이라 확인을 받는다(이 링크는 영구히 열 수 없게 됨).
-      if (!confirm(`"${b.title}" 보드를 삭제할까요?\n이 링크는 더 이상 열 수 없습니다.`)) return
+      const ok = await openConfirmDialog({
+        title: '공유 보드 삭제',
+        message: `"${b.title}" 보드를 삭제할까요?\n이 링크는 더 이상 열 수 없습니다.`,
+        confirmLabel: '삭제',
+        destructive: true,
+      })
+      if (!ok) return
       delBtn.disabled = true
       try {
         await adapter.remove(b.id)

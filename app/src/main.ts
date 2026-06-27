@@ -59,6 +59,7 @@ import { createVirtualizer } from './core/virtualize'
 import { getShareAdapter } from './core/supabase-share'
 import { openShareDialog } from './core/share-dialog'
 import { openBoardManager } from './core/board-manager'
+import { openConfirmDialog, openPromptDialog } from './core/dialog'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -99,15 +100,23 @@ function markLockedCacheDirty(): void {
 const toolbar = createToolbar({
   onAction: (id) => runAction(id),
   isDesktop: isDesktop(),
-  // 상태바 보드 이름 클릭 → 이름 변경(prompt). 변경은 자동저장에 즉시 반영.
   onRenameBoard: () => {
-    const name = prompt('보드 이름', board.board.title || '')
-    if (name === null) return // 취소
-    board.board.title = name.trim() || '제목 없음'
-    void autosave.saveNow()
-    refreshBoardStatus()
+    void renameBoard()
   },
 })
+
+async function renameBoard(): Promise<void> {
+  const name = await openPromptDialog({
+    title: '보드 이름 변경',
+    label: '보드 이름',
+    initialValue: board.board.title || '',
+    confirmLabel: '저장',
+  })
+  if (name === null) return
+  board.board.title = name.trim() || '제목 없음'
+  void autosave.saveNow()
+  refreshBoardStatus()
+}
 
 // 상태바의 보드 이름·공유 배지를 현재 board 상태로 갱신한다(restore·이름변경·공유 후 호출).
 function refreshBoardStatus(): void {
@@ -1449,8 +1458,7 @@ function ensureNoteFont(note: BoardNote) {
 }
 
 // ---- 댓글(이미지에 부착하는 메모) ----
-// 선택한 단일 이미지에 comment 텍스트를 prompt로 입력/수정한다(가벼운 표시 — 본격 UI는 추후).
-function editComment() {
+async function editComment() {
   const ids = sel.values()
   if (ids.length !== 1) {
     showToast('댓글은 이미지 1개를 선택했을 때 가능합니다', true)
@@ -1462,7 +1470,13 @@ function editComment() {
     return
   }
   const cur = im.comment ?? ''
-  const next = window.prompt('이미지 댓글(메모) · 비우면 삭제', cur)
+  const next = await openPromptDialog({
+    title: '이미지 댓글 편집',
+    label: '이미지 댓글(메모) · 비우면 삭제',
+    initialValue: cur,
+    confirmLabel: '저장',
+    multiline: true,
+  })
   if (next === null) return // 취소
   const trimmed = next.trim()
   commit()
@@ -1644,6 +1658,15 @@ async function openBoard() {
       state = await loadBoardFile(file)
       fileName = file.name
       fileSize = file.size
+    }
+    if (dirty) {
+      const ok = await openConfirmDialog({
+        title: '보드 열기',
+        message: '저장하지 않은 변경이 있습니다.\n불러오면 현재 보드가 대체됩니다. 계속할까요?',
+        confirmLabel: '불러오기',
+        destructive: true,
+      })
+      if (!ok) return
     }
     history.push(board)
     await restore(state)
@@ -2045,7 +2068,15 @@ function openBoardManagerPanel(): void {
     onToast: showToast,
     // 클라우드 공유본을 편집 앱으로 불러온다(load → 원격 이미지 인라인 → restore).
     onLoadIntoEditor: async (id) => {
-      if (dirty && !confirm('저장하지 않은 변경이 있습니다.\n불러오면 현재 보드가 대체됩니다. 계속할까요?')) return
+      if (dirty) {
+        const ok = await openConfirmDialog({
+          title: '보드 불러오기',
+          message: '저장하지 않은 변경이 있습니다.\n불러오면 현재 보드가 대체됩니다. 계속할까요?',
+          confirmLabel: '불러오기',
+          destructive: true,
+        })
+        if (!ok) return
+      }
       showToast('불러오는 중…', true)
       const res = await adapter.load(id)
       if (!res.ok) {
@@ -2195,7 +2226,7 @@ function runAction(id: string) {
     case 'tool.eraser': setActiveTool('eraser'); break
     case 'tool.eyedropper': setActiveTool('eyedropper'); break
     // 댓글(선택 이미지에 메모)
-    case 'comment.edit': editComment(); break
+    case 'comment.edit': void editComment(); break
     // 파일
     case 'file.import': openImageFiles(); break
     case 'file.save': void save(); break
@@ -2411,7 +2442,12 @@ void (async () => {
     if (await autosave.hasRecovery()) {
       const ts = await autosave.getRecoveryTimestamp()
       const when = ts ? new Date(ts).toLocaleString() : '이전'
-      if (window.confirm(`비정상 종료로 저장되지 않은 작업이 있습니다(${when}).\n복구하시겠습니까?`)) {
+      const ok = await openConfirmDialog({
+        title: '자동저장 복구',
+        message: `비정상 종료로 저장되지 않은 작업이 있습니다(${when}).\n복구하시겠습니까?`,
+        confirmLabel: '복구',
+      })
+      if (ok) {
         const recovered = await autosave.loadRecovery()
         if (recovered) {
           await restore(recovered)

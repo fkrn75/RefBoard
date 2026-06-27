@@ -38,7 +38,7 @@ export interface ToolbarOptions {
   actions?: ToolbarButton[] // 버튼 세트 교체(생략 시 DEFAULT_BUTTONS 사용)
   mount?: HTMLElement // 오버레이를 붙일 부모(생략 시 document.body)
   isDesktop?: boolean // 데스크탑 여부. false면 desktopOnly 버튼을 숨긴다(생략 시 true로 간주해 모두 노출)
-  onRenameBoard?: () => void // 상태바 보드 이름 클릭 시 호출(이름 변경 트리거). 미지정이면 클릭 비활성.
+  onRenameBoard?: () => void | Promise<void> // 상태바 보드 이름 클릭 시 호출(이름 변경 트리거). 미지정이면 클릭 비활성.
 }
 
 // createToolbar가 돌려주는 핸들. 상태 갱신과 정리(destroy)를 제공한다.
@@ -344,7 +344,7 @@ export function createToolbar(opts: ToolbarOptions): ToolbarHandle {
   boardNameEl.type = 'button'
   if (opts.onRenameBoard) {
     boardNameEl.title = '클릭해 보드 이름 변경'
-    boardNameEl.addEventListener('click', () => opts.onRenameBoard?.())
+    boardNameEl.addEventListener('click', () => void opts.onRenameBoard?.())
   } else {
     boardNameEl.disabled = true
   }

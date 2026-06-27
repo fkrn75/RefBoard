@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -9,6 +9,7 @@ const root = dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
   server: { port: 1420, strictPort: true },
+  test: { environment: 'jsdom' },
   build: {
     target: 'es2022',
     outDir: 'dist',
