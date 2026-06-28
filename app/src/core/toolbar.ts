@@ -298,8 +298,15 @@ export function createToolbar(opts: ToolbarOptions): ToolbarHandle {
     btn.title = def.title
     btn.setAttribute('aria-label', def.title)
     btn.dataset.action = def.actionId
-    // 아이콘이 있으면 SVG, 없으면 title 첫 글자(폴백).
-    btn.innerHTML = def.icon || `<span>${def.title.charAt(0)}</span>`
+    // 아이콘이 있으면 SVG(코드 내 신뢰 상수), 없으면 title 첫 글자 폴백.
+    // 폴백은 textContent로 넣어 def.title이 외부 주입되더라도 XSS 표면이 되지 않게 한다.
+    if (def.icon) {
+      btn.innerHTML = def.icon
+    } else {
+      const span = doc.createElement('span')
+      span.textContent = def.title.charAt(0)
+      btn.appendChild(span)
+    }
     // 같은 actionId가 마지막에 등록된 버튼이 setActive 대상이 된다(보통 1:1).
     btnByAction.set(def.actionId, btn)
     toolbar.appendChild(btn)

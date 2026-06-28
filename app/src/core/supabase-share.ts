@@ -173,7 +173,7 @@ export class SupabaseShareAdapter implements ShareAdapter {
           // 🔴 방어: srcs 값은 attachSrcSets가 만든 dataURL이어야 한다. dataURL이 아니면(손상 객체의
           // 서명 URL이 인라인 실패로 잔존하는 등) 그대로 put하면 dataUrlToBlob이 URL 텍스트를 blob으로
           // 올려 Storage를 깨뜨린다. 조용한 재오염 대신 어느 이미지인지 알리며 명확히 실패시킨다.
-          if (!it.srcs.thumb.startsWith('data:') || !it.srcs.medium.startsWith('data:')) {
+          if (!it.srcs.thumb.startsWith('data:') || !it.srcs.medium.startsWith('data:') || !it.srcs.orig.startsWith('data:')) {
             throw new Error(`이미지 데이터가 손상되었거나 인라인되지 않았습니다(item ${it.id}). 공유를 중단합니다.`)
           }
           // 일반 이미지: thumb/medium만 업로드(orig 기본 미저장, P1#3).

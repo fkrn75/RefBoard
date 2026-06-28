@@ -365,11 +365,12 @@ git push origin main
 
 - **[선택] `app/src/core/autosave.ts:124-141`** 다중탭 동시 saveNow read→write TOCTOU. **이미 `BroadcastChannel`(`lastObservedRemoteTs`)+`ts` 비교로 대부분 방어됨** — 잔여 미세 경합뿐. 난이도 대비 효용 낮음 → **현행 유지(스킵)**.
 
-### 12.5 [ ] P3 (방어심도·엣지, 선택) — 굳히기
-- `app/src/core/supabase-share.ts:176-178` 손상 가드가 `orig`는 검사 안 함(thumb/medium만) — 다운스트림 `assertNoDataUrls`가 막아 실손상 경로는 없으나 일관성용으로 `orig`도 조건 추가.
-- `app/src/core/arrange-sort.ts:163` `av = a.addedAt ?? a.z` — addedAt(ms)과 z(작은 정수)를 같은 축에서 섞음. 한 보드에 둘이 혼재하면 "추가순" 왜곡. **처방**: addedAt 없으면 0이 아닌 폴백.
-- `app/src/core/toolbar.ts:302` 라벨 폴백 `innerHTML`에 `def.title.charAt(0)` — 현재 하드코딩이라 무해하나 `opts.actions`로 외주입 시 XSS 표면. **처방**: 폴백을 `textContent`로.
-- `app/src/core/export-image.ts:38-46` `scale` 상한 없음(하한 0.01만) — 비정상 큰 값이면 OOM 엣지. **처방**: `Math.min(8, …)` 등 상한.
+### 12.5 [x] P3 (방어심도·엣지, 선택) — 굳히기 ✅ 완료(2026-06-28, Claude 직접)
+- [x] `app/src/core/supabase-share.ts:176` 손상 가드에 `orig`도 추가 — `!it.srcs.orig.startsWith('data:')` 조건 합류(일관성).
+- [x] `app/src/core/arrange-sort.ts` added 정렬에서 addedAt(ms)/z(정수) **그룹 분리** — 둘 다 있으면 addedAt 비교, 한쪽만 있으면 레거시(z만) 항목을 앞으로, 둘 다 없으면 z 폴백. ms와 z를 같은 축에서 절대 안 섞음. `sortItems` export + **회귀 테스트 7개**(`arrange-sort.test.ts`).
+- [x] `app/src/core/toolbar.ts` 라벨 폴백을 `textContent`로 — `def.icon`만 `innerHTML`(신뢰 상수), 첫 글자 폴백은 `createElement('span')+textContent`로 XSS 표면 제거.
+- [x] `app/src/core/export-image.ts` `scale` 상한 추가 — `Math.min(8, Math.max(0.01, …))`로 [0.01, 8] 클램프(비정상 대값 OOM 방지).
+- 검증: `npm run test` **39/39**(arrange-sort 7 신규) · `npm run build` 0 · preview 툴바 19버튼 정상 렌더·console 에러 0.
 
 ### 작업 중 유지할 불변식 (재확인)
 - `as unknown as`/`as any`로 board 모델(`BoardItem`)과 Pixi 렌더 노드(`ItemNode`)를 혼동하지 말 것 — 12.1은 캐스팅이 아니라 **참조 고착**이라는 변종이니, 같은 클래스(noteeditor가 live board를 못 봄)를 항상 의심.

@@ -34,12 +34,12 @@ function mimeOf(format: ExportFormat): string {
 // jpg 품질(0~1). 무손실 png에는 미적용.
 const JPG_QUALITY = 0.92
 
-// 옵션 정규화(기본값 채우기). scale은 최소 0.01로 클램프(0/음수 방지).
+// 옵션 정규화(기본값 채우기). scale은 [0.01, 8]로 클램프(0/음수 방지 + 비정상 대값 OOM 방지).
 function normalize(opts: ExportOptions | undefined): Required<ExportOptions> {
   const o = opts ?? {}
   return {
     format: o.format ?? 'png',
-    scale: Math.max(0.01, o.scale ?? 1),
+    scale: Math.min(8, Math.max(0.01, o.scale ?? 1)),
     bg: o.bg ?? '#ffffff',
     padding: Math.max(0, o.padding ?? 0),
   }

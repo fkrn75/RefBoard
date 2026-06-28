@@ -16,7 +16,7 @@
 
 // 정렬 기준 키.
 //   name   = 파일명(name) 오름차순(locale 비교). 없으면 id로 폴백.
-//   added  = 추가 시각(addedAt) 오름차순. 없으면 z로 폴백.
+//   added  = 추가 시각(addedAt) 오름차순. addedAt 없는 레거시 항목은 앞으로 모아 z로 폴백.
 //   order  = 현재 입력 순서 그대로(정렬하지 않음).
 //   random = seed 기반 결정적 셔플(seed 없으면 입력순 유지).
 export type SortKey = 'name' | 'added' | 'order' | 'random'
@@ -129,7 +129,8 @@ export function arrangeGrid(
 // ─────────────────────────────────────────────────────────────────────────
 
 // 기준 키로 정렬한 새 배열을 반환한다(입력 배열은 불변).
-function sortItems(items: SortItem[], key: SortKey, seed?: number): SortItem[] {
+// 순수 함수라 단위 테스트용으로 export(arrange-sort.test.ts).
+export function sortItems(items: SortItem[], key: SortKey, seed?: number): SortItem[] {
   // order: 입력 순서 그대로(사본만 반환).
   if (key === 'order') return items.slice()
 
@@ -158,11 +159,17 @@ function sortItems(items: SortItem[], key: SortKey, seed?: number): SortItem[] {
     return arr
   }
 
-  // added: 추가 시각 오름차순. addedAt 없으면 z로 폴백(둘 다 숫자 비교).
+  // added: 추가 시각(epoch ms) 오름차순. addedAt(ms)과 z(작은 정수)는 자릿수가 크게 달라
+  // 같은 축에서 섞으면 정렬이 왜곡되므로(z만 있는 레거시 아이템이 항상 앞으로 쏠림) 그룹을 분리한다.
+  //  - 둘 다 addedAt 있음 → addedAt 비교
+  //  - 한쪽만 있음 → addedAt 없는(레거시) 쪽을 앞으로
+  //  - 둘 다 없음 → z(레이어 순서)로 폴백
   arr.sort((a, b) => {
-    const av = a.addedAt ?? a.z
-    const bv = b.addedAt ?? b.z
-    return av - bv
+    const aHas = a.addedAt != null
+    const bHas = b.addedAt != null
+    if (aHas && bHas) return a.addedAt! - b.addedAt!
+    if (aHas !== bHas) return aHas ? 1 : -1
+    return a.z - b.z
   })
   return arr
 }
