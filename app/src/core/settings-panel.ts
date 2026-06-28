@@ -33,9 +33,10 @@ import {
 } from './keymap'
 import { MODAL_Z_INDEX } from './constants'
 import { createFocusTrap, type FocusTrap } from './modal'
+import { getRenderSettings, setPixelated } from './render-settings'
 
 // ---- 탭 식별자 ----
-export type SettingsTab = 'theme' | 'keys'
+export type SettingsTab = 'theme' | 'keys' | 'general'
 
 // ---- 토큰 메타(나열 순서 + 라벨 + 프리셋 이름 라벨) ----
 // theme.ts의 ThemeTokens 키 순서를 그대로 따르되, 각 토큰에 사람이 읽는 한국어 라벨을 부여한다.
@@ -192,6 +193,7 @@ function buildDom(): void {
   for (const def of [
     { id: 'theme' as const, label: '테마' },
     { id: 'keys' as const, label: '단축키' },
+    { id: 'general' as const, label: '일반' },
   ]) {
     const btn = document.createElement('button')
     btn.type = 'button'
@@ -264,7 +266,7 @@ function tabButtonCss(active: boolean): string {
 
 // 현재 activeTab에 맞춰 탭 버튼 강조를 갱신한다.
 function applyTabButtonStyles(): void {
-  for (const id of ['theme', 'keys'] as SettingsTab[]) {
+  for (const id of ['theme', 'keys', 'general'] as SettingsTab[]) {
     const btn = tabBtns[id]
     if (btn) btn.style.cssText = tabButtonCss(id === activeTab)
   }
@@ -287,7 +289,8 @@ function renderBody(): void {
   if (!bodyEl) return
   bodyEl.textContent = ''
   if (activeTab === 'theme') renderThemeTab(bodyEl)
-  else renderKeysTab(bodyEl)
+  else if (activeTab === 'keys') renderKeysTab(bodyEl)
+  else renderGeneralTab(bodyEl)
 }
 
 // ============================================================
@@ -673,6 +676,45 @@ function commitCapture(e: KeyboardEvent): void {
   // 충돌 경고는 각 행 refresh가 findConflict로 표시하지만, 다른 행(충돌 상대)의
   // 표시도 갱신돼야 하므로 단축키 탭 전체를 다시 그린다.
   if (activeTab === 'keys') renderBody()
+}
+
+// ============================================================
+//  ③ 일반 탭
+// ============================================================
+
+function renderGeneralTab(host: HTMLDivElement): void {
+  const s = getRenderSettings()
+
+  // 섹션 제목.
+  const heading = document.createElement('div')
+  heading.textContent = '렌더링'
+  heading.style.cssText = ['font-size:11px', 'font-weight:600', 'color:var(--rb-text-dim, #777)', 'padding:2px 4px 8px', 'letter-spacing:.04em'].join(';')
+  host.appendChild(heading)
+
+  // 픽셀 보간 토글 행(체크박스 + 설명).
+  const row = document.createElement('label')
+  row.style.cssText = ['display:flex', 'align-items:flex-start', 'gap:10px', 'cursor:pointer', 'padding:6px 4px'].join(';')
+
+  const cb = document.createElement('input')
+  cb.type = 'checkbox'
+  cb.checked = s.pixelated
+  cb.style.cssText = ['width:16px', 'height:16px', 'cursor:pointer', 'flex:none', 'margin-top:2px'].join(';')
+  cb.addEventListener('change', () => setPixelated(cb.checked))
+
+  const textWrap = document.createElement('div')
+  textWrap.style.cssText = ['display:flex', 'flex-direction:column', 'gap:2px', 'min-width:0'].join(';')
+  const title = document.createElement('span')
+  title.textContent = '픽셀 또렷하게 (확대 시 도트 유지)'
+  title.style.cssText = 'font-size:13px'
+  const desc = document.createElement('span')
+  desc.textContent = '끄면 부드럽게 보간(기본), 켜면 확대해도 픽셀을 또렷이 유지합니다 — 픽셀아트 레퍼런스용.'
+  desc.style.cssText = ['font-size:12px', 'color:var(--rb-text-dim, #777)', 'line-height:1.4'].join(';')
+  textWrap.appendChild(title)
+  textWrap.appendChild(desc)
+
+  row.appendChild(cb)
+  row.appendChild(textWrap)
+  host.appendChild(row)
 }
 
 // ---- 공통 키 입력 처리(캡처 단계) ----

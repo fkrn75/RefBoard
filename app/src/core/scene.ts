@@ -1,4 +1,4 @@
-import { Application, Container, Graphics, Sprite, Text, Texture, Assets, Rectangle, type FederatedPointerEvent } from 'pixi.js'
+import { Application, Container, Graphics, Sprite, Text, Texture, Assets, Rectangle, ColorMatrixFilter, type FederatedPointerEvent } from 'pixi.js'
 import { AnimatedGIF } from '@pixi/gif'
 import type { BoardImage, BoardItem, BoardNote, BoardDrawing } from './board'
 import { isImageItem, isNoteItem, isDrawingItem } from './board'
@@ -58,6 +58,8 @@ export class Scene {
   private rubberLayer = new Graphics() // 러버밴드 사각형
   private gizmoLayer = new Graphics() // 변형 기즈모 핸들
   private gridLayer = new Graphics() // 배경 그리드(최하단)
+  // 픽셀 보간(전역): true면 확대 시 도트(nearest), false면 부드럽게(linear). render-settings와 동기화.
+  private pixelated = false
 
   // 입력 콜백 (main이 주입)
   onPointerDown?: (p: ScenePointer) => void
@@ -168,6 +170,7 @@ export class Scene {
       sprite = new Sprite(texture)
     }
     sprite.anchor.set(0.5) // 중심 기준 배치/스케일/회전
+    this.applyScaleMode(sprite) // 현재 픽셀 보간 모드(nearest/linear) 반영
     this.wireNode(sprite, img.id)
     this.applyTransform(sprite, img)
     this.world.addChild(sprite)
@@ -175,7 +178,43 @@ export class Scene {
     // 종전 texture.width 기반 경계와 수학적으로 동일하다(회귀 0).
     this.registerNode(img.id, sprite, croppedSize(img.crop, img.natural), img.transform.scale)
     if (img.crop) this.applyCrop(img.id, img) // 저장본/복원 시 크롭 반영
+    if (img.grayscale) this.applyGrayscale(sprite, true) // 저장된 흑백 플래그 반영
     return sprite
+  }
+
+  // ---- 픽셀 보간(전역) ----
+  // 확대 시 도트(nearest)/부드럽게(linear)를 전환. 텍스처 source.scaleMode로 적용한다.
+  // 새 이미지는 addImage가, 기존 이미지는 이 메서드가 일괄 갱신한다.
+  setPixelated(on: boolean): void {
+    this.pixelated = on
+    for (const id of this.allIds()) {
+      const sp = this.getSprite(id)
+      if (sp) this.applyScaleMode(sp)
+    }
+  }
+
+  // 한 스프라이트에 현재 픽셀 보간 모드를 반영(addImage·setPixelated 공용).
+  private applyScaleMode(sprite: Sprite): void {
+    const src = sprite.texture?.source
+    if (src) src.scaleMode = this.pixelated ? 'nearest' : 'linear'
+  }
+
+  // ---- 흑백(그레이스케일, 이미지별) ----
+  // 선택 이미지를 비파괴로 흑백/컬러 전환. 원본 텍스처는 그대로 두고 ColorMatrixFilter만 얹는다.
+  setGrayscale(id: string, on: boolean): void {
+    const sp = this.getSprite(id)
+    if (sp) this.applyGrayscale(sp, on)
+  }
+
+  // 한 스프라이트에 흑백 필터를 켜고/끈다(addImage 복원·setGrayscale 공용).
+  private applyGrayscale(sprite: Sprite, on: boolean): void {
+    if (on) {
+      const f = new ColorMatrixFilter()
+      f.grayscale(1, false) // (강도 1, multiply=false)
+      sprite.filters = [f]
+    } else {
+      sprite.filters = []
+    }
   }
 
   private addBrokenItemPlaceholder(it: BoardItem, reason: unknown): Graphics {

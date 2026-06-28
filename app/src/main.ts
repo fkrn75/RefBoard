@@ -60,6 +60,7 @@ import { createDrawingTool } from './core/drawing-tool'
 import { createShareIo } from './core/share-io'
 import { createActionDispatcher, type ActionMap } from './core/action-dispatcher'
 import { createPointerInput } from './core/pointer-input'
+import { getRenderSettings, onRenderSettingsChange } from './core/render-settings'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -80,6 +81,9 @@ let lockedCache = new Set<string>()
 // 테마 부팅: 저장된 테마를 캔버스 생성 전에 적용해 배경/그리드 색이 처음부터 일치하게 한다.
 applyTheme(getTheme())
 const scene = await Scene.create(host)
+// 저장된 픽셀 보간 설정을 적용하고, 설정 패널 변경을 구독해 즉시 반영한다(전역).
+scene.setPixelated(getRenderSettings().pixelated)
+onRenderSettingsChange((s) => scene.setPixelated(s.pixelated))
 const sel = new Selection()
 const history = new History()
 let cam = { ...board.camera }
@@ -866,6 +870,34 @@ function toggleLock() {
   showToast(anyUnlocked ? '잠금' : '잠금 해제', true)
 }
 
+// 선택한 이미지의 흑백(그레이스케일)을 토글한다. 하나라도 컬러면 전체 흑백, 모두 흑백이면 전체 컬러.
+// 비파괴(원본 텍스처 불변, ColorMatrixFilter만 적용) — refb/공유에 grayscale 플래그로 저장된다.
+function toggleGrayscale() {
+  const ids = sel.values().filter((id) => {
+    const it = getItem(id)
+    return it != null && isImageItem(it)
+  })
+  if (ids.length === 0) {
+    showToast('흑백으로 바꿀 이미지를 선택하세요', true)
+    return
+  }
+  commit()
+  // 하나라도 컬러면 전체 흑백 켜기, 모두 흑백이면 전체 끄기(컬러).
+  const anyColor = ids.some((id) => {
+    const it = getItem(id)
+    return it && isImageItem(it) ? !it.grayscale : false
+  })
+  for (const id of ids) {
+    const it = getItem(id)
+    if (it && isImageItem(it)) {
+      it.grayscale = anyColor
+      scene.setGrayscale(id, anyColor)
+    }
+  }
+  afterEdit()
+  showToast(anyColor ? '흑백' : '컬러', true)
+}
+
 // ---- 그리드 (Phase 2.8) ----
 // 그리드가 켜져 있으면 현재 카메라/뷰포트 기준으로 다시 계산해 그린다. 꺼져 있으면 지운다.
 function drawGridIfOn() {
@@ -1241,7 +1273,9 @@ async function exportScene() {
   const restoreOverlays = scene.hideOverlays()
   try {
     const blob = await exportSceneAll(scene.app.renderer, scene.world, { format: 'png', padding: 16 })
-    downloadBlob(blob, 'refboard-scene.png')
+    // 파일명을 보드 제목 기반으로(공백→_, 제목 없으면 'refboard' 폴백 = 기존 동작 보존).
+    const base = (board.board.title || '').trim().replace(/\s+/g, '_') || 'refboard'
+    downloadBlob(blob, withImageExt(`${base}-scene`, 'png'))
     showToast('씬 전체를 PNG로 내보냈습니다', true)
   } catch (err) {
     showToast(err instanceof Error ? err.message : '내보내기 실패')
@@ -1264,7 +1298,8 @@ async function exportSel() {
       (id) => scene.getSprite(id),
       { format: 'png', padding: 8 },
     )
-    downloadBlob(blob, 'refboard-selection.png')
+    const base = (board.board.title || '').trim().replace(/\s+/g, '_') || 'refboard'
+    downloadBlob(blob, withImageExt(`${base}-selection`, 'png'))
     showToast(`선택 ${ids.length}개를 PNG로 내보냈습니다`, true)
   } catch (err) {
     showToast(err instanceof Error ? err.message : '내보내기 실패')
@@ -1653,6 +1688,8 @@ const actionMap: ActionMap = {
   'app.settings': openSettings,
   'share.webLink': () => void shareIo.shareWebLink(),
   'share.manage': () => shareIo.openBoardManagerPanel(),
+  // 편집(선택 이미지 흑백 전환)
+  'edit.toggleGrayscale': toggleGrayscale,
 }
 const dispatcher = createActionDispatcher(actionMap)
 

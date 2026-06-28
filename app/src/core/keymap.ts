@@ -310,6 +310,7 @@ export const DEFAULT_ACTIONS: Action[] = [
   { id: 'edit.undo', label: '실행취소', group: '편집', defaultCombo: 'Ctrl+Z' },
   { id: 'edit.redo', label: '다시실행', group: '편집', defaultCombo: 'Ctrl+Shift+Z' },
   { id: 'edit.toggleLock', label: '잠금 토글', group: '편집', defaultCombo: 'Alt+L' },
+  { id: 'edit.toggleGrayscale', label: '흑백 전환(선택 이미지)', group: '편집', defaultCombo: 'Alt+G' },
 
   // 정렬·배치(Arrange)
   { id: 'arrange.pack', label: '자동 배치(Pack)', group: '정렬', defaultCombo: 'Ctrl+P' },
