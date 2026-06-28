@@ -1,4 +1,5 @@
-import type { BoardItem, BoardNote, BoardState } from './board'
+import { normalizeZ } from './zorder'
+import type { BoardNote, BoardState } from './board'
 import type { Scene } from './scene'
 import type { Selection } from './selection'
 
@@ -11,6 +12,7 @@ interface NoteEditorDeps {
   commit: () => void
   afterEdit: () => void
   updateMinimap: () => void
+  removeItem: (id: string) => void
   showToast: (message: string, info?: boolean) => void
   hintEl: HTMLElement
   getTextDefaults: () => { color: string; fontSize: number; fontFamily: string }
@@ -61,13 +63,13 @@ export function createNoteEditor(deps: NoteEditorDeps): NoteEditorApi {
     dispose()
 
     if (id) {
-      const note = deps.scene.getNode(id) as unknown as BoardItem | null
+      const note = deps.board.items.find((item): item is BoardNote => item.id === id && item.type === 'note') ?? null
       if (!note || note.type !== 'note') return
       if (text.length === 0) {
         deps.commit()
-        deps.scene.removeItem(id)
+        deps.removeItem(id)
         deps.sel.clear()
-        deps.updateMinimap()
+        deps.afterEdit()
         if (deps.board.items.length === 0) {
           deps.hintEl.style.display = ''
         }
@@ -106,8 +108,9 @@ export function createNoteEditor(deps: NoteEditorDeps): NoteEditorApi {
     } catch (err) {
       console.warn('[note] 노트 렌더링 실패', err)
       deps.showToast('노트를 화면에 추가하지 못했습니다.')
-      deps.scene.removeItem(note.id)
+      deps.removeItem(note.id)
       deps.board.items = deps.board.items.filter((item) => item.id !== note.id)
+      normalizeZ(deps.board.items)
       deps.sel.clear()
       deps.updateMinimap()
       return

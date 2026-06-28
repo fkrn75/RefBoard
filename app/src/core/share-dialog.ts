@@ -20,11 +20,13 @@ export interface ShareDialogResult {
 
 export function openShareDialog(): Promise<ShareDialogResult | null> {
   return new Promise((resolve) => {
+    let confirm = (): void => {}
     openDialogShell<ShareDialogResult | null>({
       title: '웹 링크 공유',
       ariaLabel: '웹 링크 공유',
       cancelValue: null,
       resolve,
+      onEnter: () => confirm(),
       render: ({ body, footer, settle, close }) => {
         const publicCheck = document.createElement('input')
         publicCheck.type = 'checkbox'
@@ -101,7 +103,7 @@ export function openShareDialog(): Promise<ShareDialogResult | null> {
           settle(result)
           close()
         }
-        const confirm = (): void => {
+        confirm = (): void => {
           const isPublic = publicCheck.checked
           const days = Number(expirySelect.value) || 0
           const expiresAt = days > 0 ? new Date(Date.now() + days * 86400000) : undefined

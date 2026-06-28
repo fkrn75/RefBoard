@@ -681,10 +681,12 @@ attachEditorTwoFingerGestures(host, {
 // ---- 팬: 우클릭/휠클릭 드래그 (DOM 이벤트) ----
 let panning = false
 let last = { x: 0, y: 0 }
+let panRect: DOMRect | null = null
 host.addEventListener('pointerdown', (e) => {
   if (e.button === 2 || e.button === 1) {
     panning = true
     last = { x: e.clientX, y: e.clientY }
+    panRect = host.getBoundingClientRect()
     host.setPointerCapture(e.pointerId)
   }
 })
@@ -694,12 +696,13 @@ host.addEventListener('pointermove', (e) => {
   cam.y += e.clientY - last.y
   last = { x: e.clientX, y: e.clientY }
   applyCam()
-  const rect = host.getBoundingClientRect()
+  const rect = panRect ?? host.getBoundingClientRect()
   cursorReporter.report(scene.screenToWorld(e.clientX - rect.left, e.clientY - rect.top))
 })
 host.addEventListener('pointerup', (e) => {
   if (panning) {
     panning = false
+    panRect = null
     host.releasePointerCapture(e.pointerId)
   }
 })
@@ -1060,6 +1063,14 @@ function syncZIndex() {
   }
 }
 
+function removeItemById(id: string) {
+  scene.removeItem(id)
+  const idx = board.items.findIndex((item) => item.id === id)
+  if (idx >= 0) board.items.splice(idx, 1)
+  normalizeZ(board.items)
+  syncZIndex()
+}
+
 // 좌우/상하 뒤집기 (Alt+Shift+H / Alt+Shift+V) — 비파괴(transform.flipX/Y 토글)
 function flipSelected(axis: 'x' | 'y') {
   const ids = sel.values()
@@ -1299,6 +1310,7 @@ const noteEditor = createNoteEditor({
   commit,
   afterEdit,
   updateMinimap,
+  removeItem: removeItemById,
   showToast,
   hintEl: hint,
   getTextDefaults: () => ({ color: TEXT_COLOR, fontSize: TEXT_FONT_SIZE, fontFamily: TEXT_FONT_FAMILY }),

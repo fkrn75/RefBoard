@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { openConfirmDialog, openPromptDialog } from './dialog'
+import { openDialogShell } from './dialog-shell'
 
 const originalRaf = globalThis.requestAnimationFrame
 const originalCancelRaf = globalThis.cancelAnimationFrame
@@ -92,6 +93,33 @@ describe('openConfirmDialog', () => {
     })
     findButton('취소')?.click()
     await expect(canceled).resolves.toBe(false)
+  })
+})
+
+describe('openDialogShell', () => {
+  it('submits the primary action on Enter when enabled', async () => {
+    let triggerPrimary = () => {}
+    const result = new Promise<string | null>((resolve) => {
+      openDialogShell<string | null>({
+        title: '공유',
+        ariaLabel: '공유',
+        cancelValue: null,
+        onEnter: () => triggerPrimary(),
+        resolve,
+        render: ({ body, settle }) => {
+          triggerPrimary = () => settle('ok')
+          const input = document.createElement('input')
+          input.type = 'text'
+          body.appendChild(input)
+        },
+      })
+    })
+
+    const input = document.querySelector('input')
+    expect(input).not.toBeNull()
+    input?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+
+    await expect(result).resolves.toBe('ok')
   })
 })
 

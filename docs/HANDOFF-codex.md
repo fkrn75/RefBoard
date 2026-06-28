@@ -264,6 +264,32 @@ git push origin main
 - `autosave.ts`는 BroadcastChannel + ts 비교로 다중탭 자동저장 충돌을 피하도록 보강했다.
 - 최신 상태 기준 SSOT는 `체크리스트.md`다. 남은 건 7.3의 God-file 분리뿐이다.
 
+## 11. ✅ 검수 회귀·후속 (2026-06-28) — 반영 완료
+
+> 커밋 `a30f425`의 후속 검수에서 지적된 11.1~11.3 항목은 현재 코드에 반영되었다. 검증은 `cd app && npm run test` / `cd app && npm run build`로 다시 통과했다.
+
+### 11.1 ✅ 기존 노트 재편집/삭제 복구
+- `app/src/core/note-editor.ts`가 이제 Pixi 렌더 노드가 아니라 `board.items`의 `BoardNote`를 기준으로 편집 대상을 찾는다.
+- 노트 삭제는 `main.ts`의 공용 제거 경로를 통해 `scene.removeItem()` + `board.items` 정리 + `normalizeZ()` + `syncZIndex()`까지 같이 처리한다.
+- 회귀 방지용 `note-editor.test.ts`를 추가했다. 기존 노트 재편집과 빈 텍스트 삭제 둘 다 커버한다.
+
+### 11.2 ✅ 공유 다이얼로그 Enter 확인 복구
+- `dialog-shell.ts`에 옵션형 `onEnter` 처리를 넣었다.
+- `share-dialog.ts`는 이제 Enter로도 `링크 만들기`를 확정한다.
+
+### 11.3 ✅ 커서 팬 경로 reflow 완화
+- 팬 시작 시 `host.getBoundingClientRect()`를 캐시하고, 드래그 중에는 그 값을 재사용한다.
+- 포인터 이동 중의 불필요한 레이아웃 읽기를 줄였다.
+
+### 11.4 ⚪ 추가 확인 사항
+- `viewer`의 `forbidden` 화면 액션 버튼과 `lightbox` 스와이프 네비는 이번 수정 범위 밖이다.
+- 필요하면 다음 손에서 UX 보완 후보로 다시 보자.
+
+### 작업 중 유지할 불변식 (재확인)
+- `as unknown as`/`as any`로 board 모델(`BoardItem`)과 Pixi 렌더 노드(`ItemNode`)를 혼동하지 말 것.
+- 매직바이트 방어선(`refb.ts`)·`deserialize` 하위호환 유지(§4·§10).
+- 검증: `cd app && npm run test` / `cd app && npm run build` 통과.
+
 ---
 
 — 끝. 막히면 `체크리스트.md` Phase 7과 위 §4 불변식을 다시 확인할 것.

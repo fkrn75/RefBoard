@@ -9,6 +9,7 @@ export function openDialogShell<T>(options: {
   render: (ctx: { body: HTMLDivElement; footer: HTMLDivElement; settle(value: T): void; close(): void }) => void
   resolve: (value: T) => void
   cancelValue: T
+  onEnter?: () => void
 }): void {
   if (openRoot) {
     options.resolve(options.cancelValue)
@@ -103,6 +104,12 @@ export function openDialogShell<T>(options: {
       e.preventDefault()
       e.stopPropagation()
       close()
+      return
+    }
+    if (e.key === 'Enter' && options.onEnter && !(e.target instanceof HTMLTextAreaElement) && !e.isComposing) {
+      e.preventDefault()
+      e.stopPropagation()
+      options.onEnter()
       return
     }
     if (e.key === 'Tab') {
