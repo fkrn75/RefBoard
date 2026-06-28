@@ -334,11 +334,36 @@ git push origin main
        break
 ```
 
-### 12.4 [ ] P2 (경미·엣지, 여유 시) — 상호작용 잔버그 묶음
-- **`app/src/viewer/main.ts:145-152`** 핀치 줌 중심 미보정: `onPinch`의 `cx/cy`(host 로컬 px)를 world 변환 없이 `cam.x`에 섞어, host가 `inset:0`이 아니면 줌 중심이 손가락과 어긋남. **처방**: 휠 줌과 동일하게 `before = screenToWorld(cx,cy)` → 줌 적용 후 `cam.x = cx - before.x*cam.zoom`로 통일. (host 레이아웃 확인 후 — 현재 inset:0이면 증상 안 보일 수 있음.)
-- **`app/src/viewer/lightbox.ts:325-329`** 단일 이미지서 ←→ 키가 순환해 `show()` 재실행 → 확대/offset 리셋. **처방**: `go()` 초입 `if (items.length < 2) return`.
-- **`app/src/main.ts:799-803`** 잠긴 단일 아이템 클릭 시 `origins`가 비어 빈 `move` 진입(잡히는데 안 움직임). **처방**: `origins.size === 0`이면 move 대신 무동작/러버밴드 폴백.
-- **`app/src/core/autosave.ts:124-141`** 다중탭 동시 saveNow의 read→write TOCTOU(IndexedDB CAS 부재). **처방**: write 직전 같은 트랜잭션에서 ts 재확인(get→조건부 put). 난이도 있으니 선택.
+### 12.4 [x] P2 (경미·엣지, 여유 시) — 상호작용 잔버그 묶음
+> ⚠️ 재확인(2026-06-28 검수): **1번 핀치 줌은 오탐 — 정상이므로 건드리지 말 것.** 실제 처리 대상은 2(lightbox, 명확)·3(잠긴 move, 경미)·4(autosave, 선택).
+
+- ~~`viewer/main.ts:145` 핀치 줌 중심 미보정~~ **✅ 정상(오탐) — 수정 금지.** `touch.ts`의 `toLocal`이 `clientX-rect.left`로 **host 로컬 px**를 cx/cy로 주고, 보정식 `cam.x = cx-(cx-cam.x)*applied`는 휠 줌의 `cam.x = mx-before.x*zoom`과 **수학적으로 동일**(mx도 host 로컬). 어긋남 없음.
+
+- **[수정] `app/src/viewer/lightbox.ts:325`** 단일 이미지서 ←→ 키가 순환해 `show()` 재실행 → 확대/offset 리셋. nav 버튼은 1개면 이미 숨지만(`updateNavButtons`) 키보드 화살표가 `go()`를 그대로 호출. **패치**:
+```diff
+ function go(delta: number): void {
+-  if (items.length === 0) return
++  if (items.length < 2) return
+   const n = items.length
+   show(((index + delta) % n + n) % n)
+ }
+```
+
+- **[수정·경미] `app/src/main.ts:799-803`** 잠긴 아이템만 선택된 채 클릭 시 `origins`가 비어 빈 `move`로 진입(잡히는데 안 움직임). **패치**(origins 루프 직후·`others` 수집 전 삽입, return으로 빠지므로 아래 grabbing 커서 설정도 자연히 건너뜀):
+```diff
+    for (const id of sel.values()) {
+      const img = getItem(id)
+      if (img && !img.locked) origins.set(id, { x: img.transform.x, y: img.transform.y })
+    }
+    const rubber = maybeStartRubberDrag(origins.size, p.world, p.shift)
+    if (rubber) {
+      drag = rubber
+      return
+    }
+    const others: AABB[] = []
+```
+
+- **[선택] `app/src/core/autosave.ts:124-141`** 다중탭 동시 saveNow read→write TOCTOU. **이미 `BroadcastChannel`(`lastObservedRemoteTs`)+`ts` 비교로 대부분 방어됨** — 잔여 미세 경합뿐. 난이도 대비 효용 낮음 → **현행 유지(스킵)**.
 
 ### 12.5 [ ] P3 (방어심도·엣지, 선택) — 굳히기
 - `app/src/core/supabase-share.ts:176-178` 손상 가드가 `orig`는 검사 안 함(thumb/medium만) — 다운스트림 `assertNoDataUrls`가 막아 실손상 경로는 없으나 일관성용으로 `orig`도 조건 추가.

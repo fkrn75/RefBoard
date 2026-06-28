@@ -323,7 +323,7 @@ function updateNavButtons(): void {
 
 // 현재 위치에서 delta(-1/+1)만큼 이동(양끝에서 순환).
 function go(delta: number): void {
-  if (items.length === 0) return
+  if (items.length < 2) return
   const n = items.length
   show(((index + delta) % n + n) % n)
 }

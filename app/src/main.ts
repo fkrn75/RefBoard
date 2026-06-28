@@ -40,6 +40,7 @@ import { openPalette, isPaletteOpen } from './core/command-palette'
 import { downscaleIfLarge, canDecodeImage, blobToDataURL } from './core/downscale'
 import { IMAGE_MAX_EDGE, OVERLAY_Z_INDEX, ZOOM_MAX, ZOOM_MIN } from './core/constants'
 import { mapWithConcurrency } from './core/concurrency'
+import { maybeStartRubberDrag } from './core/selection-drag'
 import { attachEditorTwoFingerGestures } from './core/editor-touch'
 import {
   isDesktop,
@@ -800,6 +801,11 @@ scene.onPointerDown = (p: ScenePointer) => {
     for (const id of sel.values()) {
       const img = getItem(id)
       if (img && !img.locked) origins.set(id, { x: img.transform.x, y: img.transform.y })
+    }
+    const rubber = maybeStartRubberDrag(origins.size, p.world, p.shift)
+    if (rubber) {
+      drag = rubber
+      return
     }
     const others: AABB[] = []
     for (const id of scene.allIds()) {
