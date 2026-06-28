@@ -89,7 +89,7 @@ function axisLines(
   const startIdx = Math.floor(lo / spacing) - 1
   const endIdx = Math.ceil(hi / spacing) + 1
   // 방어적 상한: 개수가 폭주하면 중앙을 기준으로 잘라낸다(빈 화면보다 일부라도 그리는 편이 안전).
-  let count = endIdx - startIdx + 1
+  const count = endIdx - startIdx + 1
   let from = startIdx
   let to = endIdx
   if (count > MAX_LINES_PER_AXIS) {
@@ -97,7 +97,6 @@ function axisLines(
     const half = Math.floor(MAX_LINES_PER_AXIS / 2)
     from = mid - half
     to = mid + half
-    count = to - from + 1
   }
   for (let i = from; i <= to; i++) {
     out.push({ coord: i * spacing, index: i })

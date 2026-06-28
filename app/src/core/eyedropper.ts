@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any --
+   EyeDropper는 표준 타입이 없는 실험적 브라우저 API이고, PixiJS renderer.extract.pixels는
+   v8 버전별 반환형 편차가 있어 의도적으로 any로 흡수한다(아래 런타임 가드로 안전성 확보). */
 // 색상 추출(스포이드) — 화면의 한 픽셀 색을 뽑아 HEX/RGB로 돌려주고, 작은 스와치로 표시·복사한다.
 //
 // 설계 원칙:

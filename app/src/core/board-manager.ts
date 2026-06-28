@@ -147,7 +147,7 @@ export function openBoardManager(options: BoardManagerOptions): void {
       body.appendChild(signin)
       return
     }
-    let boards: BoardSummary[] = []
+    let boards: BoardSummary[]
     try {
       boards = await adapter.listMine()
     } catch (e) {
