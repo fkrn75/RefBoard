@@ -81,9 +81,9 @@ RefBoard/
         keymap.ts command-palette.ts toolbar.ts settings-panel.ts theme.ts
         style-control.ts opacity-control.ts eyedropper.ts export-image.ts
         minimap.ts virtualize.ts downscale.ts srcset.ts
-        share-adapter.ts share-export.ts supabase.ts supabase-share.ts share-dialog.ts board-manager.ts
+        share-adapter.ts supabase.ts supabase-share.ts share-dialog.ts board-manager.ts
         tauri-bridge.ts
-      viewer/          뷰어 전용: main.ts touch.ts lightbox.ts lazyload.ts board-meta.ts pwa.ts
+      viewer/          뷰어 전용: main.ts touch.ts lightbox.ts board-meta.ts pwa.ts
     src-tauri/         Tauri 2 셸(Rust) · tauri.conf.json · 윈도우 모드 커맨드(set_window_opacity 등)
 ```
 

@@ -172,11 +172,11 @@ app/
       keymap.ts      단축키 맵 · command-palette.ts 커맨드 팔레트
       style-control.ts / opacity-control.ts / toolbar.ts / settings-panel.ts  UI
       minimap.ts / virtualize.ts / downscale.ts / srcset.ts  성능·대량 이미지
-      share-export.ts / supabase-share.ts / supabase.ts / share-*.ts  공유
+      supabase-share.ts / supabase.ts / share-*.ts  공유
       tauri-bridge.ts  Tauri 데스크탑 연동 · theme.ts 테마
     viewer/          공유 뷰어 전용
       main.ts        뷰어 부트스트랩 · touch.ts 핀치/탭 · lightbox.ts 라이트박스
-      lazyload.ts / board-meta.ts / pwa.ts
+      board-meta.ts / pwa.ts
   src-tauri/         Tauri 2 데스크탑 셸(Rust) · tauri.conf.json
 기능명세서.md          PureRef 조사 + 기능 명세(기획서)
 체크리스트.md          개발 진행 단일 출처(SSOT)
