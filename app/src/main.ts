@@ -63,6 +63,7 @@ import { openBoardManager } from './core/board-manager'
 import { openConfirmDialog, openPromptDialog } from './core/dialog'
 import { createNoteEditor } from './core/note-editor'
 import { createCursorReporter } from './core/cursor-reporter'
+import { createDrawingTool } from './core/drawing-tool'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -166,7 +167,7 @@ const TOOL_ACTION_IDS: Record<ActiveTool, string> = {
 function setActiveTool(tool: ActiveTool) {
   if (activeTool === tool) return
   // 진행 중이던 드로잉/텍스트 편집은 도구 전환 시 정리(취소).
-  cancelDrawing()
+  drawingTool.cancel()
   noteEditor.commit() // 편집 중 텍스트가 있으면 확정 후 전환
   activeTool = tool
   for (const t of Object.keys(TOOL_ACTION_IDS) as ActiveTool[]) {
@@ -190,27 +191,8 @@ const TOOL_HINT: Record<ActiveTool, string> = {
   eyedropper: '스포이드: 캔버스를 클릭해 색을 추출(클립보드 복사)',
 }
 
-// ---- 드로잉 미리보기 오버레이(2D 캔버스) ----
-// scene(PixiJS)은 직접 수정 금지라, 드래그 중 임시 도형은 host 위에 얹는 별도 2D 캔버스에 그린다.
-// 좌표는 월드→화면(world*zoom + cam)으로 환산. 확정(pointerup) 시 지우고 실제 BoardDrawing을 scene에 추가한다.
-const previewCanvas = document.createElement('canvas')
-previewCanvas.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;z-index:40'
-host.appendChild(previewCanvas)
-const previewCtx = previewCanvas.getContext('2d')
-function resizePreviewCanvas() {
-  const dpr = globalThis.devicePixelRatio || 1
-  previewCanvas.width = Math.round(host.clientWidth * dpr)
-  previewCanvas.height = Math.round(host.clientHeight * dpr)
-  previewCanvas.style.width = host.clientWidth + 'px'
-  previewCanvas.style.height = host.clientHeight + 'px'
-  if (previewCtx) previewCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
-}
-resizePreviewCanvas()
-window.addEventListener('resize', resizePreviewCanvas)
-function clearPreview() {
-  if (previewCtx) previewCtx.clearRect(0, 0, host.clientWidth, host.clientHeight)
-}
-// 월드 좌표 → 화면(미리보기 캔버스) 좌표.
+// 월드 좌표 → 화면 좌표(미리보기·노트 입력기·스포이드 등에서 공용). 드로잉 미리보기 캔버스는
+// drawing-tool 모듈이 자체 소유한다(7.3 God-file 분리).
 function worldToScreen(wx: number, wy: number): { x: number; y: number } {
   return { x: wx * cam.zoom + cam.x, y: wy * cam.zoom + cam.y }
 }
@@ -756,7 +738,7 @@ scene.onPointerDown = (p: ScenePointer) => {
     return
   }
   if (activeTool === 'eraser') {
-    eraseAt(p.hitId) // 클릭 적중 드로잉 삭제 + 이후 드래그도 onPointerMove에서 지움
+    drawingTool.eraseAt(p.hitId) // 클릭 적중 드로잉 삭제 + 이후 드래그도 onPointerMove에서 지움
     return
   }
   if (activeTool === 'eyedropper') {
@@ -766,9 +748,8 @@ scene.onPointerDown = (p: ScenePointer) => {
     return
   }
   if (activeTool !== 'select') {
-    // 펜/직선/사각형/타원/화살표: 드래그 시작.
-    drawState = { tool: activeTool as DrawingTool, points: [{ x: p.world.x, y: p.world.y }], committed: false }
-    renderDrawPreview()
+    // 펜/직선/사각형/타원/화살표: 드래그 시작(drawing-tool이 미리보기·확정까지 처리).
+    drawingTool.begin(activeTool as DrawingTool, p.world)
     return
   }
   // 0) 크롭 모드: 대상 이미지 기준 드래그 시작점(원본픽셀) 기록
@@ -825,38 +806,14 @@ scene.onPointerDown = (p: ScenePointer) => {
 
 scene.onPointerMove = (p: ScenePointer) => {
   cursorReporter.report(p.world)
-  // 드로잉 도구: 드래그 중 점 수집 + 미리보기.
-  if (drawState) {
-    if (drawState.tool === 'pen') drawState.points.push({ x: p.world.x, y: p.world.y })
-    else {
-      // 2점 도형: 끝점만 갱신(시작점 유지). Shift=수평/수직/45° 제약.
-      let ex = p.world.x
-      let ey = p.world.y
-      if (p.shift) {
-        const s0 = drawState.points[0]
-        const dx = ex - s0.x
-        const dy = ey - s0.y
-        if (drawState.tool === 'line' || drawState.tool === 'arrow') {
-          // 가장 가까운 45° 방향으로 스냅.
-          const ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4)
-          const len = Math.hypot(dx, dy)
-          ex = s0.x + Math.cos(ang) * len
-          ey = s0.y + Math.sin(ang) * len
-        } else {
-          // rect/ellipse: 정사각형/정원(짧은 변에 맞춤).
-          const m = Math.min(Math.abs(dx), Math.abs(dy))
-          ex = s0.x + Math.sign(dx) * m
-          ey = s0.y + Math.sign(dy) * m
-        }
-      }
-      drawState.points = [drawState.points[0], { x: ex, y: ey }]
-    }
-    renderDrawPreview()
+  // 드로잉 도구: 드래그 중 점 수집 + 미리보기(drawing-tool이 처리).
+  if (drawingTool.isActive()) {
+    drawingTool.extend(p.world, p.shift)
     return
   }
   // 지우개: 버튼을 누른 채 이동하면 지나가는 드로잉을 계속 삭제(드래그 지우기).
   if (activeTool === 'eraser') {
-    if (p.hitId) eraseAt(p.hitId)
+    if (p.hitId) drawingTool.eraseAt(p.hitId)
     return
   }
   // 크롭 모드: 드래그 사각형 미리보기(월드 좌표)
@@ -935,8 +892,8 @@ scene.onPointerMove = (p: ScenePointer) => {
 
 scene.onPointerUp = (p: ScenePointer) => {
   // 드로잉 도구: 드래그 종료 → BoardDrawing 확정.
-  if (drawState) {
-    void finishDrawing()
+  if (drawingTool.isActive()) {
+    drawingTool.finish()
     return
   }
   if (activeTool === 'eraser') return // 지우개는 down/move에서 처리, up은 무시
@@ -1152,137 +1109,23 @@ function drawGridIfOn() {
 // 텍스트 / 펜·도형 드로잉 / 댓글 (Phase: 텍스트·드로잉·댓글)
 // ============================================================================
 
-// ---- 드로잉(펜/도형) 입력 ----
-// 드래그하는 동안 월드 좌표 점을 모은다. 펜=연속점, line/rect/ellipse/arrow=시작·끝 2점만 갱신.
-let drawState: { tool: DrawingTool; points: { x: number; y: number }[]; committed: boolean } | null = null
-
-// 진행 중인 드로잉을 취소(미리보기만 지우고 아무것도 추가하지 않음).
-function cancelDrawing() {
-  drawState = null
-  clearPreview()
-}
-
-// 현재 drawState를 화면 미리보기 캔버스에 그린다(월드→화면 변환, 화면 픽셀 굵기).
-function renderDrawPreview() {
-  if (!previewCtx || !drawState) return
-  clearPreview()
-  const pts = drawState.points
-  if (pts.length === 0) return
-  const sp = pts.map((p) => worldToScreen(p.x, p.y))
-  previewCtx.save()
-  previewCtx.strokeStyle = DRAW_COLOR
-  previewCtx.fillStyle = DRAW_COLOR
-  previewCtx.lineWidth = Math.max(1, DRAW_WIDTH * cam.zoom)
-  previewCtx.lineCap = 'round'
-  previewCtx.lineJoin = 'round'
-  const a = sp[0]
-  const b = sp[sp.length - 1]
-  previewCtx.beginPath()
-  if (drawState.tool === 'pen') {
-    previewCtx.moveTo(a.x, a.y)
-    for (let i = 1; i < sp.length; i++) previewCtx.lineTo(sp[i].x, sp[i].y)
-    previewCtx.stroke()
-  } else if (drawState.tool === 'line') {
-    previewCtx.moveTo(a.x, a.y)
-    previewCtx.lineTo(b.x, b.y)
-    previewCtx.stroke()
-  } else if (drawState.tool === 'rect') {
-    previewCtx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y))
-  } else if (drawState.tool === 'ellipse') {
-    const cx = (a.x + b.x) / 2
-    const cy = (a.y + b.y) / 2
-    previewCtx.ellipse(cx, cy, Math.abs(b.x - a.x) / 2, Math.abs(b.y - a.y) / 2, 0, 0, Math.PI * 2)
-    previewCtx.stroke()
-  } else if (drawState.tool === 'arrow') {
-    drawArrowPath(previewCtx, a.x, a.y, b.x, b.y, Math.max(1, DRAW_WIDTH * cam.zoom))
-  }
-  previewCtx.restore()
-}
-
-// 화살표(직선 + 머리) 경로를 2D 컨텍스트에 그린다(미리보기 전용).
-function drawArrowPath(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number, w: number) {
-  ctx.beginPath()
-  ctx.moveTo(x1, y1)
-  ctx.lineTo(x2, y2)
-  ctx.stroke()
-  const ang = Math.atan2(y2 - y1, x2 - x1)
-  const head = Math.max(10, w * 3) // 머리 길이(화면 px)
-  const spread = Math.PI / 7
-  ctx.beginPath()
-  ctx.moveTo(x2, y2)
-  ctx.lineTo(x2 - head * Math.cos(ang - spread), y2 - head * Math.sin(ang - spread))
-  ctx.moveTo(x2, y2)
-  ctx.lineTo(x2 - head * Math.cos(ang + spread), y2 - head * Math.sin(ang + spread))
-  ctx.stroke()
-}
-
-// 드래그 종료 → 모은 점으로 BoardDrawing 생성. 바운딩박스 중심을 transform.x/y로,
-// points는 그 중심을 원점(0,0)으로 정규화해 저장한다(scene·gizmo가 natural/transform만 보면 되도록).
-async function finishDrawing() {
-  if (!drawState) return
-  const tool = drawState.tool
-  let pts = drawState.points
-  cancelDrawing()
-  if (pts.length === 0) return
-  // line/arrow/rect/ellipse는 시작·끝 2점만 의미가 있다(중간 이동 흔적 제거).
-  if (tool !== 'pen' && pts.length >= 2) pts = [pts[0], pts[pts.length - 1]]
-  // 바운딩박스 산출.
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  for (const p of pts) {
-    if (p.x < minX) minX = p.x
-    if (p.x > maxX) maxX = p.x
-    if (p.y < minY) minY = p.y
-    if (p.y > maxY) maxY = p.y
-  }
-  let w = maxX - minX
-  let h = maxY - minY
-  // 너무 작은(클릭 수준) 드래그는 도형으로 만들지 않는다.
-  const tiny = 3 / cam.zoom
-  if (tool !== 'pen' && w < tiny && h < tiny) return
-  if (tool === 'pen' && pts.length < 2) return
-  // 선(수평/수직)·점은 박스가 0이 될 수 있어 최소 1로 보정(natural=0이면 AABB/기즈모가 깨짐).
-  w = Math.max(w, 1)
-  h = Math.max(h, 1)
-  const cx = (minX + maxX) / 2
-  const cy = (minY + maxY) / 2
-  // 중심 기준 로컬 좌표로 정규화.
-  const local = pts.map((p) => ({ x: p.x - cx, y: p.y - cy }))
-  const d: BoardDrawing = {
-    id: genId(),
-    type: 'drawing',
-    tool,
-    points: local,
-    color: DRAW_COLOR,
-    width: DRAW_WIDTH,
-    natural: { w, h },
-    transform: { x: cx, y: cy, scale: 1, rotation: 0 },
-    opacity: 1,
-    locked: false,
-    z: board.items.length,
-  }
-  commit()
-  board.items.push(d)
-  scene.addDrawing(d) // 동기(Graphics 반환)
-  hint.style.display = 'none'
-  sel.set([d.id]) // 그린 직후 선택 → 바로 이동/변형 가능
-  updateMinimap()
-}
-
-// 지우개: 클릭/드래그 지점에 적중한 "드로잉" 아이템을 삭제한다(이미지·노트는 보존).
-function eraseAt(hitId: string | null) {
-  if (!hitId) return
-  const idx = board.items.findIndex((i) => i.id === hitId)
-  if (idx < 0) return
-  if (board.items[idx].type !== 'drawing') return // 드로잉만 지운다
-  commit()
-  scene.removeItem(hitId)
-  board.items.splice(idx, 1)
-  normalizeZ(board.items)
-  syncZIndex()
-  sel.clear()
-  updateMinimap()
-  if (board.items.length === 0) hint.style.display = ''
-}
+// ---- 드로잉(펜/도형) 입력·지우개 → drawing-tool 모듈로 분리(7.3 God-file 분리) ----
+// drawState 생명주기·미리보기 2D 캔버스·도형 확정·지우개를 createDrawingTool이 캡슐화한다.
+// 포인터 핸들러는 begin/extend/finish/cancel/isActive/eraseAt만 호출한다.
+const drawingTool = createDrawingTool({
+  host,
+  scene,
+  getBoard: () => board, // restore()가 board를 재할당하므로 getter로 항상 live board 참조
+  sel,
+  genId,
+  commit,
+  updateMinimap,
+  syncZIndex,
+  worldToScreen,
+  getZoom: () => cam.zoom,
+  getDrawStyle: () => ({ color: DRAW_COLOR, width: DRAW_WIDTH }),
+  hintEl: hint,
+})
 
 // ---- 스포이드(색 추출) ----
 // 클릭 지점의 색을 추출한다. 추출 색은 스와치로 잠시 보여주고 클립보드(HEX)에 복사한다.
@@ -2038,7 +1881,7 @@ function runAction(id: string) {
     case 'edit.selectAll': sel.set(scene.allIds()); break
     case 'edit.escape':
       if (noteEditor.isOpen()) noteEditor.cancel() // 텍스트 편집 중 → 취소
-      else if (drawState) cancelDrawing() // 드로잉 드래그 중 → 취소
+      else if (drawingTool.isActive()) drawingTool.cancel() // 드로잉 드래그 중 → 취소
       else if (cropMode) exitCropMode()
       else if (activeTool !== 'select') setActiveTool('select') // 도구 사용 중 → 선택 도구로 복귀
       else {
