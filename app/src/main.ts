@@ -1,4 +1,4 @@
-import { Scene, type ScenePointer, type Rect } from './core/scene'
+import { Scene, type ScenePointer } from './core/scene'
 import {
   createEmptyBoard,
   genId,
@@ -9,21 +9,18 @@ import {
   type BoardItem,
   type BoardNote,
   type BoardDrawing,
-  type DrawingTool,
   type BoardState,
-  type Transform,
 } from './core/board'
 import { Selection } from './core/selection'
 import { packImagesOffThread } from './core/pack-worker-client'
 import { loadBoardFile, loadBoardBlob, pickRefbFile } from './core/io'
 import { History } from './core/history'
 import { Minimap } from './core/minimap'
-import { snapToNeighbors, snapDeltaToGrid, type AABB } from './core/snap'
 import { bringToFront, sendToBack, bringForward, sendBackward, normalizeZ } from './core/zorder'
 import { alignEdge, distribute, normalizeSize, type AlignItem } from './core/align'
-import { handlePositions, hitTest, scaleFromHandle, rotateFromPointer, type HandleId } from './core/gizmo'
-import { cropRectFromDrag, croppedSize } from './core/crop'
-import { expandByGroup, planGroup, planUngroup } from './core/group'
+import { handlePositions } from './core/gizmo'
+import { croppedSize } from './core/crop'
+import { planGroup, planUngroup } from './core/group'
 import { visibleGrid } from './core/grid'
 import { OpacityControl } from './core/opacity-control'
 import { StyleControl, type StyleValues, FONT_OPTIONS } from './core/style-control'
@@ -40,7 +37,6 @@ import { isPaletteOpen } from './core/command-palette'
 import { downscaleIfLarge, blobToDataURL } from './core/downscale'
 import { IMAGE_MAX_EDGE, OVERLAY_Z_INDEX, ZOOM_MAX, ZOOM_MIN } from './core/constants'
 import { mapWithConcurrency } from './core/concurrency'
-import { maybeStartRubberDrag } from './core/selection-drag'
 import { attachEditorTwoFingerGestures } from './core/editor-touch'
 import {
   isDesktop,
@@ -63,6 +59,7 @@ import { createCursorReporter } from './core/cursor-reporter'
 import { createDrawingTool } from './core/drawing-tool'
 import { createShareIo } from './core/share-io'
 import { createActionDispatcher, type ActionMap } from './core/action-dispatcher'
+import { createPointerInput } from './core/pointer-input'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -714,237 +711,9 @@ function noteAtWorld(wx: number, wy: number): BoardNote | null {
 }
 
 // ---- 선택 + 이동 + 러버밴드 + 기즈모 변형 (PixiJS 좌클릭 이벤트) ----
-type DragState =
-  | {
-      mode: 'move'
-      start: { x: number; y: number }
-      origins: Map<string, { x: number; y: number }>
-      committed: boolean
-      others: AABB[]
-    }
-  | { mode: 'rubber'; start: { x: number; y: number }; additive: boolean }
-  | { mode: 'gizmo'; handle: HandleId; id: string; t0: Transform; start: { x: number; y: number }; committed: boolean }
-  | null
-let drag: DragState = null
-
-scene.onPointerDown = (p: ScenePointer) => {
-  if (canvasLocked) return // 캔버스 잠금 중에는 편집(선택/이동/변형) 차단 — 팬·줌·단축키는 유지
-  if (p.button !== 0) return // 좌클릭만 (우클릭은 팬)
-  // 0a) 활성 도구가 'select'가 아니면 도구별 동작으로 가로챈다(기존 선택/이동/기즈모로 진행하지 않음).
-  if (activeTool === 'text') {
-    // 텍스트 도구: 클릭 지점에 입력기 띄움(중심=클릭 월드좌표).
-    noteEditor.open(p.world)
-    return
-  }
-  if (activeTool === 'eraser') {
-    drawingTool.eraseAt(p.hitId) // 클릭 적중 드로잉 삭제 + 이후 드래그도 onPointerMove에서 지움
-    return
-  }
-  if (activeTool === 'eyedropper') {
-    // 스포이드: 클릭 지점의 색을 추출한다. EyeDropper 지원 브라우저는 좌표 무관(화면 어디서나),
-    // 폴백은 stage 픽셀에서 클릭 화면좌표의 색을 읽는다. 성공 시 스와치 표시 + 클립보드 복사.
-    void pickColorAt(p)
-    return
-  }
-  if (activeTool !== 'select') {
-    // 펜/직선/사각형/타원/화살표: 드래그 시작(drawing-tool이 미리보기·확정까지 처리).
-    drawingTool.begin(activeTool as DrawingTool, p.world)
-    return
-  }
-  // 0) 크롭 모드: 대상 이미지 기준 드래그 시작점(원본픽셀) 기록
-  if (cropMode && cropTargetId) {
-    const im = getItem(cropTargetId)
-    if (im && isImageItem(im)) {
-      cropDrag = { startPix: worldToPixel(im, p.world.x, p.world.y), startWorld: p.world }
-      return
-    }
-  }
-  // 1) 변형 기즈모 핸들 우선 판정(단일 선택·비잠금)
-  if (sel.size === 1) {
-    const gid = sel.values()[0]
-    const gim = getItem(gid)
-    if (gim && !gim.locked) {
-      const handles = handlePositions(gim.transform, itemDisplaySize(gim), 30 / cam.zoom)
-      const hit = hitTest(p.world, handles, 9 / cam.zoom)
-      if (hit) {
-        drag = { mode: 'gizmo', handle: hit, id: gid, t0: { ...gim.transform }, start: p.world, committed: false }
-        host.style.cursor = hit === 'rotate' ? 'grabbing' : 'nwse-resize'
-        return
-      }
-    }
-  }
-  // 2) 이미지 선택 + 이동 (그룹 멤버 클릭 시 그룹 통째 선택)
-  if (p.hitId) {
-    if (p.shift) sel.toggle(p.hitId)
-    else if (!sel.has(p.hitId)) sel.set(expandByGroup(board.items, [p.hitId]))
-    const origins = new Map<string, { x: number; y: number }>()
-    for (const id of sel.values()) {
-      const img = getItem(id)
-      if (img && !img.locked) origins.set(id, { x: img.transform.x, y: img.transform.y })
-    }
-    const rubber = maybeStartRubberDrag(origins.size, p.world, p.shift)
-    if (rubber) {
-      drag = rubber
-      return
-    }
-    const others: AABB[] = []
-    for (const id of scene.allIds()) {
-      if (origins.has(id)) continue
-      const a = scene.getItemAABB(id)
-      if (a) others.push(a)
-    }
-    drag = { mode: 'move', start: p.world, origins, committed: false, others }
-    host.style.cursor = 'grabbing'
-    scene.setCursor('grabbing')
-  } else {
-    // 3) 빈 곳 → 러버밴드
-    if (!p.shift) sel.clear()
-    drag = { mode: 'rubber', start: p.world, additive: p.shift }
-  }
-}
-
-scene.onPointerMove = (p: ScenePointer) => {
-  cursorReporter.report(p.world)
-  // 드로잉 도구: 드래그 중 점 수집 + 미리보기(drawing-tool이 처리).
-  if (drawingTool.isActive()) {
-    drawingTool.extend(p.world, p.shift)
-    return
-  }
-  // 지우개: 버튼을 누른 채 이동하면 지나가는 드로잉을 계속 삭제(드래그 지우기).
-  if (activeTool === 'eraser') {
-    if (p.hitId) drawingTool.eraseAt(p.hitId)
-    return
-  }
-  // 크롭 모드: 드래그 사각형 미리보기(월드 좌표)
-  if (cropMode) {
-    if (cropDrag) scene.drawRubber(rectOf(cropDrag.startWorld, p.world))
-    return
-  }
-  if (!drag) return
-  if (drag.mode === 'gizmo') {
-    const gd = drag // 타입 내로잉 캡처(아래 콜백/commit 이후에도 'gizmo'로 고정)
-    const im = getItem(gd.id)
-    if (!im) return
-    if (!gd.committed) {
-      commit()
-      gd.committed = true
-    }
-    if (gd.handle === 'rotate') {
-      im.transform.rotation = rotateFromPointer(gd.t0, gd.start, p.world, p.shift).rotation
-    } else {
-      const r = scaleFromHandle(gd.handle, gd.t0, itemDisplaySize(im), gd.start, p.world, { centered: p.alt })
-      im.transform.scale = r.scale
-      im.transform.x = r.x
-      im.transform.y = r.y
-    }
-    syncNode(im)
-    afterEdit()
-    return
-  }
-  if (drag.mode === 'move') {
-    let dx = p.world.x - drag.start.x
-    let dy = p.world.y - drag.start.y
-    if (p.shift) {
-      if (Math.abs(dx) >= Math.abs(dy)) dy = 0
-      else dx = 0
-    }
-    if (!drag.committed && (dx !== 0 || dy !== 0)) {
-      commit()
-      drag.committed = true
-    }
-    for (const [id, o] of drag.origins) {
-      const img = getItem(id)
-      if (!img) continue
-      img.transform.x = o.x + dx
-      img.transform.y = o.y + dy
-      syncNode(img)
-    }
-    // 스냅(켜졌을 때): 대표(첫) 아이템 기준 보정량을 전 선택에 적용. 이웃 우선→그리드.
-    if (snapOn && drag.origins.size > 0) {
-      const repId = [...drag.origins.keys()][0]
-      const a = scene.getItemAABB(repId)
-      if (a) {
-        const thr = 8 / cam.zoom
-        let adj = snapToNeighbors(a, drag.others, thr)
-        if (adj.dx === 0 && adj.dy === 0) adj = snapDeltaToGrid(a.minX, a.minY, 32)
-        // Shift로 한 축을 0으로 고정했으면 그 축의 스냅 보정 성분도 0으로(축 제약이 깨지지 않게).
-        if (p.shift) {
-          if (Math.abs(p.world.x - drag.start.x) >= Math.abs(p.world.y - drag.start.y)) adj.dy = 0
-          else adj.dx = 0
-        }
-        if (adj.dx !== 0 || adj.dy !== 0) {
-          for (const [id, o] of drag.origins) {
-            const img = getItem(id)
-            if (!img) continue
-            img.transform.x = o.x + dx + adj.dx
-            img.transform.y = o.y + dy + adj.dy
-            syncNode(img)
-          }
-        }
-      }
-    }
-    afterEdit()
-  } else if (drag.mode === 'rubber') {
-    scene.drawRubber(rectOf(drag.start, p.world))
-  }
-}
-
-scene.onPointerUp = (p: ScenePointer) => {
-  // 드로잉 도구: 드래그 종료 → BoardDrawing 확정.
-  if (drawingTool.isActive()) {
-    drawingTool.finish()
-    return
-  }
-  if (activeTool === 'eraser') return // 지우개는 down/move에서 처리, up은 무시
-  // 크롭 모드: 드래그 영역을 원본픽셀 크롭으로 확정(크롭 영역은 제자리 유지)
-  if (cropMode) {
-    if (cropDrag && cropTargetId) {
-      const im = getItem(cropTargetId)
-      if (im && isImageItem(im)) {
-        const endPix = worldToPixel(im, p.world.x, p.world.y)
-        const nc = cropRectFromDrag(cropDrag.startPix, endPix, im.natural)
-        if (nc.w > 4 && nc.h > 4) {
-          // 크롭 영역 중심의 현재 월드 위치 → 크롭 후 그 점이 새 중심이 되게(제자리 유지)
-          const wc = pixelToWorld(im, nc.x + nc.w / 2, nc.y + nc.h / 2)
-          commit()
-          im.crop = nc
-          im.transform.x = wc.x
-          im.transform.y = wc.y
-          scene.applyCrop(im.id, im)
-          syncNode(im)
-          afterEdit()
-        }
-      }
-    }
-    exitCropMode()
-    return
-  }
-  if (!drag) return
-  if (drag.mode === 'rubber') {
-    const r = rectOf(drag.start, p.world)
-    const hits = scene.allIds().filter((id) => {
-      const a = scene.getItemAABB(id)
-      return a !== null && !(a.maxX < r.x || a.minX > r.x + r.w || a.maxY < r.y || a.minY > r.y + r.h)
-    })
-    // 러버밴드에 걸린 항목을 그룹 단위로 확장
-    const expanded = expandByGroup(board.items, hits)
-    if (drag.additive) for (const id of expanded) sel.add(id)
-    else sel.set(expanded)
-    scene.drawRubber(null)
-  } else if (drag.mode === 'move') {
-    host.style.cursor = ''
-    scene.setCursor('grab')
-    updateMinimap()
-  } else if (drag.mode === 'gizmo') {
-    host.style.cursor = ''
-    updateMinimap()
-  }
-  drag = null
-}
-
-function rectOf(a: { x: number; y: number }, b: { x: number; y: number }): Rect {
-  return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) }
-}
+// ---- 캔버스 포인터 상호작용(선택·이동·러버밴드·기즈모·크롭) → pointer-input 모듈로 분리(7.3 God-file) ----
+// scene.onPointerDown/Move/Up 배선과 drag 상태머신은 createPointerInput이 소유한다.
+// 인스턴스 생성은 noteEditor/drawingTool 정의 이후(아래)에서 한다(클로저 deps 순서).
 
 // ---- 동작: 삭제 / 복제 / 패킹 / z순서 / 뒤집기 / 정렬 / 저장 / 열기 / Undo / Redo ----
 
@@ -1164,6 +933,38 @@ const noteEditor = createNoteEditor({
   getTextDefaults: () => ({ color: TEXT_COLOR, fontSize: TEXT_FONT_SIZE, fontFamily: TEXT_FONT_FAMILY }),
   worldToScreen: (world) => worldToScreen(world.x, world.y),
   getZoom: () => cam.zoom,
+})
+
+// 캔버스 포인터 상호작용 배선(선택·이동·러버밴드·기즈모·크롭). drag 상태머신은 모듈이 소유.
+// crop 상태(모드/대상/드래그)는 main이 관리하고 접근자로 주입한다(cropDrag는 exitCropMode가 리셋).
+const pointerInput = createPointerInput({
+  scene,
+  getBoard: () => board,
+  sel,
+  getItem,
+  getZoom: () => cam.zoom,
+  host,
+  commit,
+  afterEdit,
+  syncNode,
+  updateMinimap,
+  itemDisplaySize,
+  getActiveTool: () => activeTool,
+  getCanvasLocked: () => canvasLocked,
+  getSnapOn: () => snapOn,
+  noteEditor,
+  drawingTool,
+  pickColorAt,
+  cursorReport: (world) => cursorReporter.report(world),
+  getCropMode: () => cropMode,
+  getCropTargetId: () => cropTargetId,
+  getCropDrag: () => cropDrag,
+  setCropDrag: (v) => {
+    cropDrag = v
+  },
+  exitCropMode,
+  worldToPixel,
+  pixelToWorld,
 })
 
 // ---- 댓글(이미지에 부착하는 메모) ----
@@ -1761,7 +1562,7 @@ function escapeAction() {
   else {
     sel.clear()
     scene.drawRubber(null)
-    drag = null
+    pointerInput.cancelDrag()
   }
 }
 
