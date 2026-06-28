@@ -35,8 +35,8 @@ import { arrangeGrid, type SortItem, type SortKey } from './core/arrange-sort'
 import { pickColor, showColorSwatch, copyColor } from './core/eyedropper'
 import { openRecentPicker } from './core/recent-picker'
 import { applyTheme, getTheme, onThemeChange } from './core/theme'
-import { registerActions, matchKey, getActions, DEFAULT_ACTIONS, type Action } from './core/keymap'
-import { openPalette, isPaletteOpen } from './core/command-palette'
+import { registerActions, matchKey, DEFAULT_ACTIONS, type Action } from './core/keymap'
+import { isPaletteOpen } from './core/command-palette'
 import { downscaleIfLarge, blobToDataURL } from './core/downscale'
 import { IMAGE_MAX_EDGE, OVERLAY_Z_INDEX, ZOOM_MAX, ZOOM_MIN } from './core/constants'
 import { mapWithConcurrency } from './core/concurrency'
@@ -62,6 +62,7 @@ import { createNoteEditor } from './core/note-editor'
 import { createCursorReporter } from './core/cursor-reporter'
 import { createDrawingTool } from './core/drawing-tool'
 import { createShareIo } from './core/share-io'
+import { createActionDispatcher, type ActionMap } from './core/action-dispatcher'
 
 // 앱 진입점: Scene을 만들고 입력(선택/이동/변형/줌/팬/가져오기/단축키)을 배선한다.
 const host = document.getElementById('app') as HTMLElement
@@ -100,9 +101,9 @@ function markLockedCacheDirty(): void {
 }
 
 // ---- 데스크탑 UI 셸: 툴바 + 상태바(4.4) ----
-// 버튼 클릭은 모두 runAction(키맵과 동일 actionId)으로 흘려보내 단축키와 동작을 일원화한다.
+// 버튼 클릭은 모두 dispatcher.run(키맵과 동일 actionId)으로 흘려보내 단축키와 동작을 일원화한다.
 const toolbar = createToolbar({
-  onAction: (id) => runAction(id),
+  onAction: (id) => dispatcher.run(id),
   isDesktop: isDesktop(),
   onRenameBoard: () => {
     void renameBoard()
@@ -1737,114 +1738,122 @@ onThemeChange(() => {
 })
 
 // 키맵 액션 id를 실제 동작으로 잇는 디스패처(단축키·커맨드 팔레트 공용 진입점).
-function runAction(id: string) {
-  switch (id) {
-    // 보기
-    case 'view.fitAll': fitAll(); break
-    case 'view.focusSelected': focusSelected(); break
-    case 'view.zoomReset': zoomReset(); break
-    case 'view.toggleMinimap': minimap.toggle(); updateMinimap(); break
-    case 'view.toggleSnap':
-      snapOn = !snapOn
-      showToast(snapOn ? '스냅 켜짐 · 그리드/이웃' : '스냅 꺼짐', true)
-      break
-    case 'view.toggleGrid':
-      gridOn = !gridOn
-      drawGridIfOn()
-      showToast(gridOn ? '그리드 켜짐' : '그리드 꺼짐', true)
-      break
-    case 'view.optimize': void optimizeCanvas(); break
-    case 'navigate.prev': navigateItem(-1); break
-    case 'navigate.next': navigateItem(1); break
-    // 편집
-    case 'edit.selectAll': sel.set(scene.allIds()); break
-    case 'edit.escape':
-      if (noteEditor.isOpen()) noteEditor.cancel() // 텍스트 편집 중 → 취소
-      else if (drawingTool.isActive()) drawingTool.cancel() // 드로잉 드래그 중 → 취소
-      else if (cropMode) exitCropMode()
-      else if (activeTool !== 'select') setActiveTool('select') // 도구 사용 중 → 선택 도구로 복귀
-      else {
-        sel.clear()
-        scene.drawRubber(null)
-        drag = null
-      }
-      break
-    case 'edit.delete': deleteSelected(); break
-    case 'edit.duplicate': void duplicateSelected(); break
-    case 'edit.undo': void doUndo(); break
-    case 'edit.redo': void doRedo(); break
-    case 'edit.toggleLock': toggleLock(); break
-    // 정렬·배치
-    case 'arrange.pack': void packAll(); break
-    case 'arrange.group': groupSelected(); break
-    case 'arrange.ungroup': ungroupSelected(); break
-    case 'arrange.alignLeft': doAlign('left'); break
-    case 'arrange.alignRight': doAlign('right'); break
-    case 'arrange.alignTop': doAlign('top'); break
-    case 'arrange.alignBottom': doAlign('bottom'); break
-    case 'arrange.distributeH': doDistribute('h'); break
-    case 'arrange.distributeV': doDistribute('v'); break
-    case 'arrange.alignHCenter': doAlign('hcenter'); break
-    case 'arrange.alignVCenter': doAlign('vcenter'); break
-    case 'arrange.normWidth': doNormalize('width'); break
-    case 'arrange.normHeight': doNormalize('height'); break
-    case 'arrange.normScale': doNormalize('scale'); break
-    case 'arrange.normArea': doNormalize('area'); break
-    case 'arrange.sortName': doArrangeSort('name'); break
-    case 'arrange.sortAdded': doArrangeSort('added'); break
-    case 'arrange.sortOrder': doArrangeSort('order'); break
-    case 'arrange.sortRandom': doArrangeSort('random'); break
-    case 'arrange.bringForward': applyZOrder(bringForward); break
-    case 'arrange.bringToFront': applyZOrder(bringToFront); break
-    case 'arrange.sendBackward': applyZOrder(sendBackward); break
-    case 'arrange.sendToBack': applyZOrder(sendToBack); break
-    // 변형
-    case 'transform.crop': enterCropMode(); break
-    case 'transform.resetCrop': resetCrop(); break
-    case 'transform.resetTransform': resetTransform(); break
-    case 'transform.flipH': flipSelected('x'); break
-    case 'transform.flipV': flipSelected('y'); break
-    // 도구(텍스트·드로잉) — 활성 도구 전환
-    case 'tool.select': setActiveTool('select'); break
-    case 'tool.text': setActiveTool('text'); break
-    case 'tool.pen': setActiveTool('pen'); break
-    case 'tool.line': setActiveTool('line'); break
-    case 'tool.rect': setActiveTool('rect'); break
-    case 'tool.ellipse': setActiveTool('ellipse'); break
-    case 'tool.arrow': setActiveTool('arrow'); break
-    case 'tool.eraser': setActiveTool('eraser'); break
-    case 'tool.eyedropper': setActiveTool('eyedropper'); break
-    // 댓글(선택 이미지에 메모)
-    case 'comment.edit': void editComment(); break
-    // 파일
-    case 'file.import': openImageFiles(); break
-    case 'file.save': void save(); break
-    case 'file.open': void openBoard(); break
-    case 'file.exportScene': void exportScene(); break
-    case 'file.exportSelection': void exportSel(); break
-    case 'file.exportEachAll': void exportEachItems('all'); break
-    case 'file.exportEachSel': void exportEachItems('sel'); break
-    case 'file.recentOpen': openRecentFiles(); break
-    // 앱
-    case 'app.commandPalette': openCommandPalette(); break
-    // 창(데스크탑 전용)
-    case 'window.toggleAlwaysOnTop': void toggleAlwaysOnTop(); break
-    case 'window.toggleAlwaysOnBottom': void toggleAlwaysOnBottom(); break
-    case 'window.toggleDecorations': void toggleDecorations(); break
-    case 'window.toggleClickThrough': void toggleClickThrough(); break
-    case 'window.cycleOpacity': void cycleOpacity(); break
-    case 'window.toggleLock': toggleCanvasLock(); break
-    // 앱(설정 패널)
-    case 'app.settings': openSettings(); break
-    case 'share.webLink': void shareIo.shareWebLink(); break
-    case 'share.manage': shareIo.openBoardManagerPanel(); break
+// ---- 액션 디스패치(단축키·툴바·팔레트 공용) → action-dispatcher 모듈로 분리(7.3 God-file) ----
+// 상태 토글(let 변수 변경)은 함수로 캡슐화해 actionMap에서 참조한다(순수 함수 매핑 유지).
+function toggleSnap() {
+  snapOn = !snapOn
+  showToast(snapOn ? '스냅 켜짐 · 그리드/이웃' : '스냅 꺼짐', true)
+}
+function toggleGrid() {
+  gridOn = !gridOn
+  drawGridIfOn()
+  showToast(gridOn ? '그리드 켜짐' : '그리드 꺼짐', true)
+}
+function selectAllItems() {
+  sel.set(scene.allIds())
+}
+// Esc: 편집/드로잉/크롭/도구 모드를 우선순위대로 정리하고, 아무것도 없으면 선택 해제.
+function escapeAction() {
+  if (noteEditor.isOpen()) noteEditor.cancel() // 텍스트 편집 중 → 취소
+  else if (drawingTool.isActive()) drawingTool.cancel() // 드로잉 드래그 중 → 취소
+  else if (cropMode) exitCropMode()
+  else if (activeTool !== 'select') setActiveTool('select') // 도구 사용 중 → 선택 도구로 복귀
+  else {
+    sel.clear()
+    scene.drawRubber(null)
+    drag = null
   }
 }
 
-// 커맨드 팔레트 열기(현재 액션 목록 전달, 항목 선택 시 runAction 실행).
-function openCommandPalette() {
-  openPalette(getActions(), (id) => runAction(id))
+// 키맵 액션 id → 동작 매핑(버튼·단축키·팔레트 공용). dispatcher.run(id)로 실행한다.
+const actionMap: ActionMap = {
+  // 보기
+  'view.fitAll': fitAll,
+  'view.focusSelected': focusSelected,
+  'view.zoomReset': zoomReset,
+  'view.toggleMinimap': () => {
+    minimap.toggle()
+    updateMinimap()
+  },
+  'view.toggleSnap': toggleSnap,
+  'view.toggleGrid': toggleGrid,
+  'view.optimize': () => void optimizeCanvas(),
+  'navigate.prev': () => navigateItem(-1),
+  'navigate.next': () => navigateItem(1),
+  // 편집
+  'edit.selectAll': selectAllItems,
+  'edit.escape': escapeAction,
+  'edit.delete': deleteSelected,
+  'edit.duplicate': () => void duplicateSelected(),
+  'edit.undo': () => void doUndo(),
+  'edit.redo': () => void doRedo(),
+  'edit.toggleLock': toggleLock,
+  // 정렬·배치
+  'arrange.pack': () => void packAll(),
+  'arrange.group': groupSelected,
+  'arrange.ungroup': ungroupSelected,
+  'arrange.alignLeft': () => doAlign('left'),
+  'arrange.alignRight': () => doAlign('right'),
+  'arrange.alignTop': () => doAlign('top'),
+  'arrange.alignBottom': () => doAlign('bottom'),
+  'arrange.distributeH': () => doDistribute('h'),
+  'arrange.distributeV': () => doDistribute('v'),
+  'arrange.alignHCenter': () => doAlign('hcenter'),
+  'arrange.alignVCenter': () => doAlign('vcenter'),
+  'arrange.normWidth': () => doNormalize('width'),
+  'arrange.normHeight': () => doNormalize('height'),
+  'arrange.normScale': () => doNormalize('scale'),
+  'arrange.normArea': () => doNormalize('area'),
+  'arrange.sortName': () => doArrangeSort('name'),
+  'arrange.sortAdded': () => doArrangeSort('added'),
+  'arrange.sortOrder': () => doArrangeSort('order'),
+  'arrange.sortRandom': () => doArrangeSort('random'),
+  'arrange.bringForward': () => applyZOrder(bringForward),
+  'arrange.bringToFront': () => applyZOrder(bringToFront),
+  'arrange.sendBackward': () => applyZOrder(sendBackward),
+  'arrange.sendToBack': () => applyZOrder(sendToBack),
+  // 변형
+  'transform.crop': enterCropMode,
+  'transform.resetCrop': resetCrop,
+  'transform.resetTransform': resetTransform,
+  'transform.flipH': () => flipSelected('x'),
+  'transform.flipV': () => flipSelected('y'),
+  // 도구(텍스트·드로잉) 전환
+  'tool.select': () => setActiveTool('select'),
+  'tool.text': () => setActiveTool('text'),
+  'tool.pen': () => setActiveTool('pen'),
+  'tool.line': () => setActiveTool('line'),
+  'tool.rect': () => setActiveTool('rect'),
+  'tool.ellipse': () => setActiveTool('ellipse'),
+  'tool.arrow': () => setActiveTool('arrow'),
+  'tool.eraser': () => setActiveTool('eraser'),
+  'tool.eyedropper': () => setActiveTool('eyedropper'),
+  // 댓글(선택 이미지에 메모)
+  'comment.edit': () => void editComment(),
+  // 파일
+  'file.import': openImageFiles,
+  'file.save': () => void save(),
+  'file.open': () => void openBoard(),
+  'file.exportScene': () => void exportScene(),
+  'file.exportSelection': () => void exportSel(),
+  'file.exportEachAll': () => void exportEachItems('all'),
+  'file.exportEachSel': () => void exportEachItems('sel'),
+  'file.recentOpen': openRecentFiles,
+  // 앱
+  'app.commandPalette': () => dispatcher.openCommandPalette(),
+  // 창(데스크탑 전용)
+  'window.toggleAlwaysOnTop': () => void toggleAlwaysOnTop(),
+  'window.toggleAlwaysOnBottom': () => void toggleAlwaysOnBottom(),
+  'window.toggleDecorations': () => void toggleDecorations(),
+  'window.toggleClickThrough': () => void toggleClickThrough(),
+  'window.cycleOpacity': () => void cycleOpacity(),
+  'window.toggleLock': toggleCanvasLock,
+  // 앱(설정 패널)
+  'app.settings': openSettings,
+  'share.webLink': () => void shareIo.shareWebLink(),
+  'share.manage': () => shareIo.openBoardManagerPanel(),
 }
+const dispatcher = createActionDispatcher(actionMap)
 
 // ---- 키보드 단축키 ----
 // 키맵 테이블(matchKey)로 액션을 찾아 runAction에 위임한다. 재바인딩이 그대로 반영된다.
@@ -1858,7 +1867,7 @@ window.addEventListener('keydown', (e) => {
   const actionId = matchKey(e)
   if (actionId) {
     e.preventDefault()
-    runAction(actionId)
+    dispatcher.run(actionId)
     return
   }
   // 보조 바인딩(키맵 테이블엔 Delete/Ctrl+Shift+Z만 등록): Backspace=삭제, Ctrl+Y=다시실행.
