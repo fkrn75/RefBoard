@@ -30,7 +30,8 @@ export function openShareDialog(): Promise<ShareDialogResult | null> {
       render: ({ body, footer, settle, close }) => {
         const publicCheck = document.createElement('input')
         publicCheck.type = 'checkbox'
-        publicCheck.checked = true
+        // 기본 비공개 — 무심코 '링크 만들기'를 눌러도 공개되지 않게(알파 안전). 공개는 사용자가 의식적으로 체크.
+        publicCheck.checked = false
         publicCheck.style.cssText = 'width:16px;height:16px;cursor:pointer;accent-color:var(--rb-accent, #4aa3ff)'
 
         const pubLabel = document.createElement('span')
@@ -115,12 +116,15 @@ export function openShareDialog(): Promise<ShareDialogResult | null> {
           emailInput.disabled = pub
           mailRow.style.opacity = pub ? '0.45' : '1'
           if (pub) {
-            pubHint.textContent = '✓ 링크가 있으면 누구나 로그인 없이 볼 수 있어요 — 폰·다른 기기에서 바로 열립니다.'
-            pubHint.style.color = 'var(--rb-text-dim, #888)'
-          } else {
+            // 공개는 위험 경고 톤 — 링크 유출 시 제3자 접근 가능을 명시(무심코 노출 방지).
             pubHint.textContent =
-              '⚠️ 비공개: 받는 사람도 본인 구글 로그인이 필요해요. 폰·다른 기기에선 안 보일 수 있습니다.'
+              '⚠️ 공개: 링크를 받은 누구나 로그인 없이 볼 수 있어요. 링크가 퍼지면 제3자도 접근하니 민감한 보드는 공개하지 마세요.'
             pubHint.style.color = '#e0a33e'
+          } else {
+            // 비공개(기본)는 중립 안내 — 허용 이메일로 로그인한 사람만 열람.
+            pubHint.textContent =
+              '🔒 비공개(기본): 아래 허용 이메일로 본인 구글 로그인을 한 사람만 볼 수 있어요. 비우면 나만 볼 수 있습니다.'
+            pubHint.style.color = 'var(--rb-text-dim, #888)'
           }
         }
         publicCheck.addEventListener('change', syncPublic)

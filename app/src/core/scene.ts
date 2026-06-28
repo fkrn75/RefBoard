@@ -218,7 +218,20 @@ export class Scene {
   }
 
   private addBrokenItemPlaceholder(it: BoardItem, reason: unknown): Graphics {
-    console.warn('[scene.rebuild] 아이템 복구 실패, 플레이스홀더로 대체:', it.id, reason)
+    // 진단: 이미지면 실패한 src의 종류를 함께 남긴다. '원격URL'이면 만료된 서명 URL일 확률이 높다
+    // — 클라우드 공유 보드를 인라인 실패한 채 자동저장 → 나중에 그 URL이 만료되어 복구가 깨지는 경로(#4).
+    let srcInfo = ''
+    if (isImageItem(it)) {
+      const s = it.srcs?.medium ?? it.src ?? ''
+      srcInfo = !s
+        ? 'src=(빈 값)'
+        : /^data:/i.test(s)
+          ? `src=data(${s.length}B)`
+          : /^https?:/i.test(s)
+            ? `src=원격URL(만료/네트워크 실패 가능): ${s.slice(0, 80)}`
+            : `src=${s.slice(0, 60)}`
+    }
+    console.warn('[scene.rebuild] 아이템 복구 실패, 플레이스홀더로 대체:', it.id, srcInfo, reason)
     const size = isImageItem(it) ? croppedSize(it.crop, it.natural) : it.natural
     const w = Math.max(48, size.w)
     const h = Math.max(48, size.h)

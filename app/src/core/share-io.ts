@@ -153,6 +153,19 @@ export function createShareIo(deps: ShareIoDeps): ShareIoApi {
         }
         // 뷰어용 서명 URL(원격)을 data URL로 임베드 → 편집 앱은 항상 로컬 임베드 보드만 다룬다(재공유도 정상).
         await inlineRemoteImages(res.board)
+        // 인라인 실패(만료 서명 URL·네트워크)로 원격 URL이 남은 이미지가 있으면 경고 — 그대로 자동저장되면
+        // 나중에 그 URL이 만료돼 '복구 실패' 플레이스홀더로 뜰 수 있다(#4 예방).
+        const stillRemote = res.board.items.filter(
+          (it) =>
+            isImageItem(it) &&
+            [it.src, it.srcs?.medium, it.srcs?.thumb, it.srcs?.orig].some((u) => !!u && /^https?:/i.test(u)),
+        ).length
+        if (stillRemote > 0) {
+          deps.showToast(
+            `이미지 ${stillRemote}장을 불러오지 못했어요(링크 만료/네트워크). 그대로 두면 나중에 '복구 실패'로 보일 수 있어요.`,
+            true,
+          )
+        }
         await deps.restore(res.board)
         deps.getBoard().board.shareId = id // 이 클라우드 보드에서 왔으니 재공유 시 같은 링크를 갱신.
         deps.saveNow()
