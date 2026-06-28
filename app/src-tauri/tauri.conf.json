@@ -30,7 +30,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["msi"],
+    "publisher": "fkrn75",
+    "copyright": "© 2026 fkrn75",
+    "category": "Productivity",
+    "shortDescription": "PureRef 호환 레퍼런스 이미지 보드",
+    "longDescription": "이미지를 모아 자유롭게 배치하는 레퍼런스 보드. .refb 저장·웹 공유·드로잉·정렬·크롭을 지원합니다.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

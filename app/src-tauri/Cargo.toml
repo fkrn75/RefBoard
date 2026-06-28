@@ -1,10 +1,10 @@
 [package]
 name = "app"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "RefBoard — PureRef 호환 레퍼런스 이미지 보드"
+authors = ["fkrn75"]
 license = ""
-repository = ""
+repository = "https://github.com/fkrn75/RefBoard"
 edition = "2021"
 rust-version = "1.77.2"
 
