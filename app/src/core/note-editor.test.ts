@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createNoteEditor } from './note-editor'
 import { Selection } from './selection'
-import type { BoardNote, BoardState } from './board'
+import { createEmptyBoard, type BoardNote, type BoardState } from './board'
 import type { Scene } from './scene'
 
 const board: BoardState = {
@@ -145,6 +145,46 @@ describe('createNoteEditor', () => {
     expect(board.items).toHaveLength(1)
     expect(board.items[0]?.id).toBe('note-keep')
     expect(board.items[0]?.z).toBe(0)
+  })
+
+  it('writes a newly created note into the restored live board', () => {
+    const originalBoard = createEmptyBoard()
+    const restoredBoard = createEmptyBoard()
+    let liveBoard = originalBoard
+    scene = makeScene(liveBoard)
+    const editor = createNoteEditor({
+      host,
+      scene,
+      get board() {
+        return liveBoard
+      },
+      sel,
+      genId: () => 'generated',
+      commit: () => {},
+      afterEdit: () => {},
+      updateMinimap: () => {},
+      removeItem: () => {},
+      showToast: () => {},
+      hintEl: hint,
+      getTextDefaults: () => ({ color: '#ffffff', fontSize: 20, fontFamily: 'system-ui' }),
+      worldToScreen: ({ x, y }) => ({ x, y }),
+      getZoom: () => 1,
+    } satisfies Parameters<typeof createNoteEditor>[0])
+
+    editor.open({ x: 100, y: 120 })
+    liveBoard = restoredBoard
+    const textarea = document.querySelector('textarea')
+    expect(textarea).not.toBeNull()
+    if (!textarea) return
+    textarea.value = 'after restore'
+
+    editor.commit()
+
+    expect(originalBoard.items).toHaveLength(0)
+    expect(restoredBoard.items).toHaveLength(1)
+    expect(restoredBoard.items[0]?.type).toBe('note')
+    if (restoredBoard.items[0]?.type !== 'note') return
+    expect(restoredBoard.items[0].text).toBe('after restore')
   })
 })
 

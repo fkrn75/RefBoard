@@ -54,7 +54,7 @@ export function openPromptDialog(options: PromptDialogOptions): Promise<string |
         if (!options.multiline) {
           field.addEventListener('keydown', (e) => {
             if (!(e instanceof KeyboardEvent)) return
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !e.isComposing) {
               e.preventDefault()
               form.requestSubmit()
             }
@@ -63,7 +63,7 @@ export function openPromptDialog(options: PromptDialogOptions): Promise<string |
         if (options.multiline) {
           field.addEventListener('keydown', (e) => {
             if (!(e instanceof KeyboardEvent)) return
-            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            if (e.key === 'Enter' && !e.isComposing && (e.ctrlKey || e.metaKey)) {
               e.preventDefault()
               form.requestSubmit()
             }

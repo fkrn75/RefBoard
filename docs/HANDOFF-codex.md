@@ -10,9 +10,9 @@
 
 - **RefBoard** = [PureRef](https://www.pureref.com/) 클론(무한 캔버스 레퍼런스 이미지 보드) **+ 웹 링크 공유**(모바일/타 PC 읽기 전용 뷰어).
 - 개인 포트폴리오 프로젝트. 한국어 프로젝트(주석·문서·UI 전부 한국어).
-- **MVP·v1.0 기능은 거의 완료**. 남은 건 ① **Phase 7 개선 백로그(견고성/성능/정리/폴리시, 전부 미착수)** ② Phase 0~6의 자잘한 🟢 확장 항목.
+- **MVP·v1.0 기능은 거의 완료**. 남은 건 ① **Phase 7.3 main.ts God-file 분리** ② **Phase 7.5 잔여(P2/P3)** ③ Phase 0~6의 자잘한 🟢 확장 항목.
 - 데이터 손상 버그는 **이미 근본 수정·검증 완료**(커밋 `84c61ac` + `40c2052`). 그 방어선(매직바이트 검증)은 **건드리지 말 것**(§4).
-- **마무리 = `체크리스트.md`의 미체크(`[ ]`) 항목을 우선순위대로 구현**. 권장 시작점은 **Phase 7.1 견고성 묶음**(§6).
+- **마무리 = `체크리스트.md`의 미체크(`[ ]`) 항목을 우선순위대로 구현**. 권장 시작점은 **Phase 7.3 main.ts God-file 분리** 또는 **Phase 7.5 잔여**(§6).
 
 ---
 
@@ -143,24 +143,20 @@ RefBoard/
 
 ## 6. 남은 작업 = `체크리스트.md`의 미체크 항목
 
-전체 상세(파일:라인 + 처방 + 노력 추정)는 **`체크리스트.md` Phase 7**에 정리돼 있다. 여기엔 **첫 작업 묶음만** 요약한다.
+전체 상세(파일:라인 + 처방 + 노력 추정)는 **`체크리스트.md` Phase 7.5 / 7.3**에 정리돼 있다. 지금은 **God-file 분리 → 7.5 잔여(P2/P3)** 순으로 보면 된다.
 
 > ⚠️ Phase 7의 🔴🟠🟡는 **그 감사 자체 기준**(Phase 0~6의 P0/P1/P2와 별개): 🔴 최우선(견고성) · 🟠 중간(성능/접근성/정리) · 🟡 폴리시.
 
-### ▶ 권장 시작점: **Phase 7.1 견고성 묶음** (한 번에, 손상수정의 연장선)
+### ▶ 권장 시작점: **Phase 7.3 main.ts God-file 분리** 또는 **Phase 7.5 잔여**
 
-1. **vitest 도입 → 테스트 0건 해소**(최대 부채). 치명 버그가 전부 *순수 로직 불변식*이라 브라우저 없이 단위테스트 가능한데 회귀가드가 0이다. 첫 스위트 ROI 순서:
-   `looksLikeImageBytes`/`canDecodeImage` → `serialize↔deserialize` 왕복(+구버전/손상 입력) → `align`/`pack` AABB(natural×scale) → `keymap` combo 정규화.
-2. **`deserialize` 스키마 검증 부재** (`board.ts:124`) = 크래시 클래스. 지금은 `JSON.parse(json) as BoardState`만, `io.ts`는 `schema` 접두사만 검사("io.ts가 검증한다"는 주석과 실제가 **계약 불일치**). items 비배열·camera 누락 시 `restore()`(`main.ts:581`)·`scene.rebuild`가 터지고 NaN 전파. **검증 헬퍼 1개**로 restore·viewer(`viewer/main.ts` `isValidBoard`)·recovery·lastSession을 일괄 가드.
-3. **`scene.rebuild` `Promise.all`→`allSettled`** (`scene.ts:350`). 이미지 1장 디코드 실패가 보드 전체 로드를 reject시킴. `addImage`에 빈/손상 src 플레이스홀더 폴백도 추가.
-4. **조용한 실패 가시화**(데이터 손실을 사용자가 모름). autosave quota 초과가 `console.warn`만 / `setLastSession`·`beforeunload` 빈 catch(`recent.ts:83`, `main.ts:271`) / `handleUpload` try-catch 부재 / floating promise(`void restore(last)` `main.ts:1321`, `void scene.addNote()` `1357`) / 업로드 보상삭제 best-effort 삼킴(`supabase-share.ts:209`). → 빈 catch에 최소 `console.warn` + 핵심 경로 토스트.
+1. ~~**P1 노트 유실**~~ — `restore()` 후 `note-editor.ts`가 stale `board` 참조(부팅 시점 객체 고착). 새 노트가 live `board.items`에 안 들어가 저장/undo서 유실. 처방=createNoteEditor 호출의 `board,`→`get board(){return board}` + restore 시뮬 회귀테스트. **코드 반영 완료**.
+2. ~~**P2 IME Enter ×2**~~ — `dialog.ts` 단일행 prompt와 `command-palette.ts` 검색창이 `isComposing` 미가드라 한글 조합 확정 Enter가 즉시 제출/명령실행된다. Enter 가드 추가. **코드 반영 완료**.
+3. **P2 경미(여유 시)** — viewer 핀치 줌 중심 미보정·lightbox 단일이미지 화살표 순환·잠긴 단일 move 빈진입·autosave 다탭 TOCTOU.
+4. **P3 굳히기(선택)** — supabase `orig` 가드·arrange-sort addedAt/z 혼합·toolbar innerHTML 폴백·export scale 상한.
 
-### 그다음(토큰/노력 대비 효과 큼)
-- **7.3 빠른 손질**: 상태바 "커서" 좌표가 영구 "—"(죽은 UI, `toolbar.ts`에 칸 있는데 `updateStatus({cursor})` 호출 0건 — `main.ts:617` pointermove에서 `screenToWorld`→`updateStatus`).
-- **7.2 정리**: 죽은 코드 삭제(`share-export.ts` 133줄 전체 미사용, `viewer/lazyload.ts` 전체, `setupInstallPrompt` 미배선, 미사용 export ~27건) · DRY/매직상수 → `constants.ts`(z-index `10000`×5, `4096`×2, 줌범위 `0.05/20`×3 등).
-
-### Phase 7.2 나머지(성능·접근성) / 7.3 나머지
-- 드래그 핫패스 O(m×n)(`main.ts:814`) · import 직렬(`main.ts:2185`) · pack 메인스레드 O(25·n²) Worker화(`pack.ts`) · srcset 3회 디코드(`srcset.ts:60`) · 에디터 모달 5종 포커스 트랩 없음 · 에디터 터치 제스처 전무 · 공유 진행률 UI · prompt()/confirm()→모달 · `main.ts` 2266줄 점진 분리. ← 전부 `체크리스트.md` Phase 7.2/7.3에 파일:라인 있음.
+### 그다음: **Phase 7.3 main.ts God-file 분리**
+- `main.ts` 2266줄은 아직 크다. 현재는 `note-editor`·`cursor-reporter` 분리만 끝났고, 후보 잔여는 `pointer-input` / `drawing-tool` / `action-dispatcher` / `share-io` 쪽이다.
+- 순서는 한 모듈씩, 기능 보존하면서 점진 분리.
 
 ### Phase 0~6 잔여(대부분 🟢 확장, 선택적)
 - 0: ESLint/Prettier, npm audit 2건. · 4: 릴리스 빌드/서명, 오버레이 모드. · 5: 공유 비밀번호, 재업로드 같은 링크, 실시간 동기화, **만료안내화면 RPC는 코드 완료·라이브 SQL 사용자 실행 대기**. · 6: 다국어, 인앱 도움말. (전부 `체크리스트.md`에 `[ ]`로 있음.)
@@ -262,7 +258,7 @@ git push origin main
 - `share-dialog.ts`는 `dialog-shell.ts`를 재사용하도록 정리했다.
 - `viewer/lightbox.ts`는 터치 팬/핀치 제스처를 받도록 바꿨고, `viewer/main.ts`의 만료 화면에는 재확인 버튼을 추가했다.
 - `autosave.ts`는 BroadcastChannel + ts 비교로 다중탭 자동저장 충돌을 피하도록 보강했다.
-- 최신 상태 기준 SSOT는 `체크리스트.md`다. 남은 건 7.3의 God-file 분리뿐이다.
+- 최신 상태 기준 SSOT는 `체크리스트.md`다. 남은 건 7.3의 God-file 분리와 7.5 버그 감사 후속이다.
 
 ## 11. ✅ 검수 회귀·후속 (2026-06-28) — 반영 완료
 
@@ -288,6 +284,71 @@ git push origin main
 ### 작업 중 유지할 불변식 (재확인)
 - `as unknown as`/`as any`로 board 모델(`BoardItem`)과 Pixi 렌더 노드(`ItemNode`)를 혼동하지 말 것.
 - 매직바이트 방어선(`refb.ts`)·`deserialize` 하위호환 유지(§4·§10).
+- 검증: `cd app && npm run test` / `cd app && npm run build` 통과.
+
+---
+
+## 12. 🔴 전체 버그 감사 발견 (2026-06-28) — 12.1~12.3 코드 반영 완료, 12.4~12.5 잔여
+
+> ⚠️ **이건 문서 작업이 아니라 코드(`app/src/*.ts`) 수정 작업이다.** 12.1~12.3는 현재 코드에 반영되었고, `cd app && npm run test && npm run build`도 통과했다. **문서만 바꾸고 끝내지 말 것.** 아래 패치는 적용 근거를 남겨 두는 용도다.
+>
+> 4차원 병렬 감사(데이터무결성·직렬화/공유 · `main.ts` 에디터 상호작용 · viewer/라이트박스/가상화 · UI·유틸/타입안전)에서 **검수자가 직접 코드 대조로 확정한 항목**. 12.1(P1)·12.2·12.3(P2)은 반영 완료, 12.4·12.5는 여유 시.
+> 검증: 매 항목 후 `cd app && npm run test` / `cd app && npm run build` 0 에러. 커밋 아이덴티티 `fkrn75@gmail.com`(§9).
+
+### 12.1 [x] 🔴 P1 — `restore()` 후 노트가 죽은(stale) `board`를 가리켜 **노트 유실**
+- **파일**: `app/src/core/note-editor.ts`(66·73·102·105·112-113) + `app/src/main.ts`(649·1304-1319)
+- **근본원인**: `main.ts:1307`에서 `createNoteEditor({ ..., board, ... })`로 `board`를 **부팅 시점 객체 참조**(shorthand = 그 순간의 값)로 넘긴다. 그런데 `restore()`(`main.ts:647-656`)는 `board = state`로 **새 객체를 재할당**한다 — 주석대로 "열기·undo·redo 공용"(+크래시복구·세션복구)이라 일상적으로 실행된다. 이후 `note-editor.ts`는 `deps.board.items`(66 find / 105 push / 112 filter)로 **옛 배열**을 읽고 쓴다. 결과: restore가 한 번이라도 일어난 뒤 노트를 새로 만들면 `deps.board.items.push()`가 옛 배열에 들어가 화면(scene)엔 보이지만 **live `board`엔 없어 autosave/undo 스냅샷에서 누락 → 노트 유실**. 기존 노트 편집도 옛 배열에서 검색해 무효화될 수 있다.
+- **§11.1과의 관계**: 8be9dca(§11.1)는 `getNode` 캐스팅을 `board.items.find`로 고쳤지만 **`deps.board` 참조 자체가 stale인 건 못 고쳤다**. 그 `find`도 옛 배열에서 찾으므로 restore 후엔 여전히 깨진다. 같은 함수의 **잔존 회귀**(a30f425 God-file 분리가 도입). `note-editor.test.ts`가 restore를 안 해서(테스트의 `deps.board` === live board) 22/22 녹색이어도 살아있었다.
+- **처방(권장, 최소 변경)**: `main.ts:1304-1319`의 호출에서 `board,` 한 줄을 **getter로** 바꾼다 → `get board() { return board },`. 객체 리터럴 getter라 `deps.board` 접근마다 live `board`를 돌려주므로 **`note-editor.ts`는 무수정**으로 해결된다(`NoteEditorDeps.board: BoardState` 타입도 그대로 유효).
+- **회귀 테스트**: `note-editor.test.ts`에 "deps.board를 getter로 구성한 뒤 board 변수를 **새 BoardState로 교체**(=restore 시뮬) → 노트 생성/편집이 **새 board.items에 반영**되는지" 케이스 추가. 기존 두 테스트는 유지.
+- **수용기준**: 파일 열기/undo/redo 후 ①새 노트 생성 → 저장·재로드 시 유지 ②기존 노트 편집 → 반영. 신규 테스트 포함 `npm run test`·`build` 0.
+- **적용 패치(그대로 — `app/src/main.ts`의 createNoteEditor 호출, 현재 1307번째 줄)**. `note-editor.ts`는 손대지 않는다(getter라 `deps.board` 접근마다 live `board` 반환):
+```diff
+-  board,
++  get board() { return board },
+```
+
+### 12.2 [x] P2 — `dialog.ts` 단일행 prompt Enter가 **한글 IME 조합 중에도 즉시 제출**
+- **파일**: `app/src/core/dialog.ts:55-61`
+- **근본원인**: 단일행 input의 keydown이 `if (e.key === 'Enter') { e.preventDefault(); form.requestSubmit() }` — `e.isComposing` 미검사. 한글 조합 확정 Enter가 다이얼로그를 곧장 제출한다(보드 이름변경 등). `dialog-shell.ts:109`(§11.2)는 `!e.isComposing` 가드를 가지나 이 **필드 레벨** 핸들러엔 누락.
+- **처방**: `if (e.key === 'Enter' && !e.isComposing)`로 가드 추가.
+- **수용기준**: 한글 조합 중 Enter는 글자 확정만, 조합이 끝난 뒤 Enter로 제출.
+- **적용 패치(그대로 — `app/src/core/dialog.ts`, 현재 57번째 줄)**:
+```diff
+-            if (e.key === 'Enter') {
++            if (e.key === 'Enter' && !e.isComposing) {
+```
+
+### 12.3 [x] P2 — `command-palette.ts` 검색창 Enter가 **IME 조합 중에도 명령 실행**
+- **파일**: `app/src/core/command-palette.ts:307-311`
+- **근본원인**: **캡처단계** handleKeydown의 `case 'Enter'`가 `e.isComposing` 검사 없이 `preventDefault()`+`runIndex(activeIndex)`. 한글 검색어 조합 확정 Enter가 글자 확정 대신 하이라이트된 명령을 실행한다(캡처단계라 input보다 먼저 가로챔).
+- **처방**: Enter 분기 진입 시 조합 중이면 실행하지 말 것 — 예) `case 'Enter': if (e.isComposing) { e.stopPropagation(); break } e.preventDefault(); e.stopPropagation(); runIndex(activeIndex); break`. (캔버스 단축키 누수 방지용 `stopPropagation`은 유지, `preventDefault`+`runIndex`만 건너뜀.)
+- **수용기준**: 한글 검색어 조합 Enter는 글자 확정, 그 다음 Enter로 명령 실행.
+- **적용 패치(그대로 — `app/src/core/command-palette.ts`, 현재 307~311줄)**:
+```diff
+     case 'Enter':
++      if (e.isComposing) { e.stopPropagation(); break }
+       e.preventDefault()
+       e.stopPropagation()
+       runIndex(activeIndex)
+       break
+```
+
+### 12.4 [ ] P2 (경미·엣지, 여유 시) — 상호작용 잔버그 묶음
+- **`app/src/viewer/main.ts:145-152`** 핀치 줌 중심 미보정: `onPinch`의 `cx/cy`(host 로컬 px)를 world 변환 없이 `cam.x`에 섞어, host가 `inset:0`이 아니면 줌 중심이 손가락과 어긋남. **처방**: 휠 줌과 동일하게 `before = screenToWorld(cx,cy)` → 줌 적용 후 `cam.x = cx - before.x*cam.zoom`로 통일. (host 레이아웃 확인 후 — 현재 inset:0이면 증상 안 보일 수 있음.)
+- **`app/src/viewer/lightbox.ts:325-329`** 단일 이미지서 ←→ 키가 순환해 `show()` 재실행 → 확대/offset 리셋. **처방**: `go()` 초입 `if (items.length < 2) return`.
+- **`app/src/main.ts:799-803`** 잠긴 단일 아이템 클릭 시 `origins`가 비어 빈 `move` 진입(잡히는데 안 움직임). **처방**: `origins.size === 0`이면 move 대신 무동작/러버밴드 폴백.
+- **`app/src/core/autosave.ts:124-141`** 다중탭 동시 saveNow의 read→write TOCTOU(IndexedDB CAS 부재). **처방**: write 직전 같은 트랜잭션에서 ts 재확인(get→조건부 put). 난이도 있으니 선택.
+
+### 12.5 [ ] P3 (방어심도·엣지, 선택) — 굳히기
+- `app/src/core/supabase-share.ts:176-178` 손상 가드가 `orig`는 검사 안 함(thumb/medium만) — 다운스트림 `assertNoDataUrls`가 막아 실손상 경로는 없으나 일관성용으로 `orig`도 조건 추가.
+- `app/src/core/arrange-sort.ts:163` `av = a.addedAt ?? a.z` — addedAt(ms)과 z(작은 정수)를 같은 축에서 섞음. 한 보드에 둘이 혼재하면 "추가순" 왜곡. **처방**: addedAt 없으면 0이 아닌 폴백.
+- `app/src/core/toolbar.ts:302` 라벨 폴백 `innerHTML`에 `def.title.charAt(0)` — 현재 하드코딩이라 무해하나 `opts.actions`로 외주입 시 XSS 표면. **처방**: 폴백을 `textContent`로.
+- `app/src/core/export-image.ts:38-46` `scale` 상한 없음(하한 0.01만) — 비정상 큰 값이면 OOM 엣지. **처방**: `Math.min(8, …)` 등 상한.
+
+### 작업 중 유지할 불변식 (재확인)
+- `as unknown as`/`as any`로 board 모델(`BoardItem`)과 Pixi 렌더 노드(`ItemNode`)를 혼동하지 말 것 — 12.1은 캐스팅이 아니라 **참조 고착**이라는 변종이니, 같은 클래스(noteeditor가 live board를 못 봄)를 항상 의심.
+- 매직바이트 방어선(`refb.ts`)·`deserialize` 하위호환 유지(§4·§10·§11).
 - 검증: `cd app && npm run test` / `cd app && npm run build` 통과.
 
 ---

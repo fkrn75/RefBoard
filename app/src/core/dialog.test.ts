@@ -42,6 +42,29 @@ describe('openPromptDialog', () => {
     await expect(prompt).resolves.toBe('새 이름')
   })
 
+  it('ignores Enter while the input method is composing', async () => {
+    const requestSubmitSpy = vi.spyOn(HTMLFormElement.prototype, 'requestSubmit')
+    const prompt = openPromptDialog({
+      title: 'Compose',
+      label: 'Compose',
+      initialValue: 'keep',
+      confirmLabel: 'Confirm',
+    })
+
+    const input = document.querySelector('input')
+    expect(input).not.toBeNull()
+    if (!input) return
+
+    const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'isComposing', { value: true })
+    input.dispatchEvent(event)
+
+    expect(requestSubmitSpy).not.toHaveBeenCalled()
+    findButton('Confirm')?.click()
+
+    await expect(prompt).resolves.toBe('keep')
+  })
+
   it('uses a textarea and keeps line breaks for multiline prompts', async () => {
     const prompt = openPromptDialog({
       title: '이미지 댓글 편집',

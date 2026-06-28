@@ -1304,7 +1304,7 @@ async function pickColorAt(p: ScenePointer) {
 const noteEditor = createNoteEditor({
   host,
   scene,
-  board,
+  get board() { return board },
   sel,
   genId,
   commit,

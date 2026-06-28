@@ -45,8 +45,9 @@ export function createNoteEditor(deps: NoteEditorDeps): NoteEditorApi {
   }
 
   const ensureNoteFont = (note: BoardNote): void => {
-    if (!note.fontFamily) return
-    document.fonts
+    const fonts = document.fonts
+    if (!note.fontFamily || !fonts) return
+    fonts
       .load(`${note.fontSize}px ${note.fontFamily}`)
       .then(() => {
         const m = deps.scene.updateNote(note)

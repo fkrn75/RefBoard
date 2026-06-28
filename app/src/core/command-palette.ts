@@ -265,7 +265,7 @@ function applyActiveStyles(): void {
     const on = Number(el.dataset.index) === activeIndex
     el.style.background = on ? 'var(--rb-accent, #3b82f6)' : 'transparent'
     el.style.color = on ? 'var(--rb-accent-fg, #fff)' : 'inherit'
-    if (on) el.scrollIntoView({ block: 'nearest' })
+    if (on && 'scrollIntoView' in el) el.scrollIntoView({ block: 'nearest' })
   }
 }
 
@@ -284,6 +284,7 @@ function runIndex(i: number): void {
 // 팔레트 전용 키 처리(캡처 단계). 여기서 처리한 키는 캔버스로 새지 않게 막는다.
 function handleKeydown(e: KeyboardEvent): void {
   if (!root) return
+  if (e.isComposing) return
   switch (e.key) {
     case 'Escape':
       e.preventDefault()
