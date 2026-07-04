@@ -14,10 +14,17 @@ on:
     - cron: '17 2 * * *'
   workflow_dispatch: {} # 대시보드에서 수동 실행 버튼도 제공
 
+# 아래 keepalive 스탬프 커밋(60일 자동 비활성화 방지)에 쓰기 권한 필요
+permissions:
+  contents: write
+
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Ping Supabase REST (keep project active)
         env:
           SUPABASE_URL: https://vivsqhubriqdpqbgqnps.supabase.co
@@ -35,3 +42,27 @@ jobs:
             exit 1
           fi
           echo "Keepalive OK ✅"
+
+      - name: Keep this workflow itself alive (avoid GitHub 60-day auto-disable)
+        run: |
+          # GitHub은 리포에 60일간 아무 활동(커밋)이 없으면 예약(cron) 워크플로를
+          # 자동 비활성화한다. 그러면 위 Supabase 핑도 멈춰버린다.
+          # → 40일마다 타임스탬프 파일을 커밋해 '활동'을 만들어 타이머를 계속 리셋한다.
+          #   (GITHUB_TOKEN 커밋도 60일 활동 판정에는 포함됨. 다른 워크플로를
+          #    재트리거하진 않으므로 무한루프 걱정 없음.)
+          STAMP=.github/keepalive-stamp.txt
+          now=$(date +%s)
+          last=$(head -n1 "$STAMP" 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+          age=$(( (now - last) / 86400 ))
+          echo "keepalive stamp age: ${age} days (임계 40일)"
+          if [ "$age" -ge 40 ]; then
+            printf '%s\n%s keepalive\n' "$now" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$STAMP"
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$STAMP"
+            git commit -m "chore: keepalive stamp (60일 자동 비활성화 방지) [skip ci]"
+            git push
+            echo "타임스탬프 커밋 완료 → 60일 타이머 리셋됨."
+          else
+            echo "스탬프가 아직 신선함(<40일) → 커밋 불필요."
+          fi
