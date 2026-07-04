@@ -1,0 +1,68 @@
+name: Supabase Keepalive
+
+# 무료(Free) 플랜 Supabase 프로젝트는 7일간 DB 요청이 없으면 자동 정지된다.
+# 이 워크플로가 하루 한 번 REST API에 가벼운 쿼리를 날려 프로젝트를 살아있게 유지한다.
+# (내 PC가 꺼져 있어도 GitHub 서버에서 자동 실행됨)
+#
+# 사용하는 값은 모두 공개용이라 하드코딩해도 안전하다:
+#   - URL          : API 엔드포인트(공개)
+#   - anon 키      : publishable 키. 원래 클라이언트 번들에 노출되며 RLS로 보호됨
+
+on:
+  schedule:
+    # 매일 02:17 UTC (한국시간 11:17) — 7일 정지 한도 대비 넉넉한 여유
+    - cron: '17 2 * * *'
+  workflow_dispatch: {} # 대시보드에서 수동 실행 버튼도 제공
+
+# 아래 keepalive 스탬프 커밋(60일 자동 비활성화 방지)에 쓰기 권한 필요
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ping Supabase REST (keep project active)
+        env:
+          SUPABASE_URL: https://vivsqhubriqdpqbgqnps.supabase.co
+          SUPABASE_ANON_KEY: sb_publishable_u8O9b_YKPKYFuQH0dBkO7g_5VE1XbXA
+        run: |
+          # boards 테이블에 최소 쿼리 1건 → DB 활동으로 집계되어 정지 타이머 리셋
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            "$SUPABASE_URL/rest/v1/boards?select=id&limit=1")
+          echo "Supabase REST responded: HTTP $code"
+          # 200(정상) 또는 206(부분) 이면 성공. 그 외는 실패로 처리해 알림 유도.
+          if [ "$code" != "200" ] && [ "$code" != "206" ]; then
+            echo "::error::Unexpected status $code — 프로젝트가 정지됐거나 키/URL 변경 가능성"
+            exit 1
+          fi
+          echo "Keepalive OK ✅"
+
+      - name: Keep this workflow itself alive (avoid GitHub 60-day auto-disable)
+        run: |
+          # GitHub은 리포에 60일간 아무 활동(커밋)이 없으면 예약(cron) 워크플로를
+          # 자동 비활성화한다. 그러면 위 Supabase 핑도 멈춰버린다.
+          # → 40일마다 타임스탬프 파일을 커밋해 '활동'을 만들어 타이머를 계속 리셋한다.
+          #   (GITHUB_TOKEN 커밋도 60일 활동 판정에는 포함됨. 다른 워크플로를
+          #    재트리거하진 않으므로 무한루프 걱정 없음.)
+          STAMP=.github/keepalive-stamp.txt
+          now=$(date +%s)
+          last=$(head -n1 "$STAMP" 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+          age=$(( (now - last) / 86400 ))
+          echo "keepalive stamp age: ${age} days (임계 40일)"
+          if [ "$age" -ge 40 ]; then
+            printf '%s\n%s keepalive\n' "$now" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$STAMP"
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$STAMP"
+            git commit -m "chore: keepalive stamp (60일 자동 비활성화 방지) [skip ci]"
+            git push
+            echo "타임스탬프 커밋 완료 → 60일 타이머 리셋됨."
+          else
+            echo "스탬프가 아직 신선함(<40일) → 커밋 불필요."
+          fi
