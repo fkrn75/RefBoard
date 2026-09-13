@@ -43,6 +43,52 @@ interface NodeMeta {
   // 경계 계산에는 제외한다 → 경계 반폭/반높이 = natural × scale (gizmo.ts handlePositions와 동일식).
   // 이렇게 해야 크롭+srcs 이미지에서도 종전(texture.width×node.scale) 경계와 정확히 일치한다(회귀 0).
   scale: number
+  // Assets 캐시 키(imageCacheKey 결과). Assets.load로 로드한 이미지(비GIF)만 채워진다.
+  // removeItem이 이 키로 참조카운트를 감소시켜, 마지막 참조가 사라질 때만 실제 텍스처를 해제한다.
+  // GIF(AnimatedGIF.fromBuffer)는 Assets 캐시를 타지 않고 자체 destroy()가 텍스처까지 해제하므로 undefined.
+  texKey?: string
+}
+
+// 이미지 하나가 Assets.load에 쓰는 캐시 키를 산출한다. addImage(로드)와 참조카운트(retain/release)가
+// "정확히 같은 식"을 쓰도록 이 헬퍼 하나로 통일한다(감사 지적: 키 산출이 흩어지면 카운트가 어긋난다).
+// 보드 뷰는 medium(다중해상도)을 우선 로드하고, 없으면 원본 src로 폴백한다(편집 보드·하위호환).
+export function imageCacheKey(img: Pick<BoardImage, 'src' | 'srcs'>): string {
+  return img.srcs?.medium ?? img.src
+}
+
+// Assets 캐시 키 기준 참조카운터. 복제 이미지가 같은 src(캐시 키)를 공유하는 경우, 마지막 참조가
+// 제거될 때만 실제 텍스처(GPU/CPU)를 해제해야 한다(안 그러면 살아있는 복제본이 검은 화면이 된다).
+// PixiJS/Scene에 의존하지 않는 순수 로직이라 실제 렌더러 없이 단위 테스트 가능하다.
+export class TextureRefCounter {
+  private counts = new Map<string, number>()
+
+  // 참조 1건 추가(addImage에서 Assets.load 성공 시 호출).
+  retain(key: string): void {
+    this.counts.set(key, (this.counts.get(key) ?? 0) + 1)
+  }
+
+  // 참조 1건 제거(removeItem에서 호출). 카운트가 0 이하로 떨어져 실제 해제가 필요해지면 true를 반환한다.
+  // 등록된 적 없는 키(방어적 상황)를 release해도 음수로 내려가지 않고 false를 반환한다.
+  release(key: string): boolean {
+    const n = this.counts.get(key)
+    if (n === undefined) return false
+    if (n <= 1) {
+      this.counts.delete(key)
+      return true
+    }
+    this.counts.set(key, n - 1)
+    return false
+  }
+
+  // 현재 참조 수(테스트/디버그용). 등록 없으면 0.
+  count(key: string): number {
+    return this.counts.get(key) ?? 0
+  }
+
+  // 전체 초기화(테스트용 — Scene은 rebuild가 removeItem을 매번 거치므로 이 메서드를 쓰지 않는다).
+  clear(): void {
+    this.counts.clear()
+  }
 }
 
 // PixiJS(WebGL) 기반 무한 캔버스 렌더러.
@@ -60,6 +106,11 @@ export class Scene {
   private gridLayer = new Graphics() // 배경 그리드(최하단)
   // 픽셀 보간(전역): true면 확대 시 도트(nearest), false면 부드럽게(linear). render-settings와 동기화.
   private pixelated = false
+  // Assets 캐시 키 참조카운트(텍스처 누수 방지, TEX-LEAK). addImage에서 retain, removeItem에서 release.
+  private texRefs = new TextureRefCounter()
+  // release()가 0으로 떨어져 발사한 Assets.unload() 프라미스들. rebuild()가 addItem(재로드) 전에
+  // 이걸 기다려, "언로드 중인 캐시 키를 곧바로 다시 로드"하는 레이스(같은 보드 재구성/Undo-Redo에서 흔함)를 막는다.
+  private pendingTexUnloads = new Set<Promise<void>>()
 
   // 입력 콜백 (main이 주입)
   onPointerDown?: (p: ScenePointer) => void
@@ -158,15 +209,19 @@ export class Scene {
   // ---- 이미지 ----
   async addImage(img: BoardImage): Promise<Sprite> {
     let sprite: Sprite
+    let texKey: string | undefined
     if (Scene.isGif(img.src)) {
       // GIF: src(data URL/경로)를 ArrayBuffer로 받아 독립 AnimatedGIF 생성(autoPlay·autoUpdate 기본 true → 자동 재생).
       // Assets.load는 src 단위로 캐시해 같은 GIF가 한 인스턴스를 공유(복제 시 부모 충돌)하므로 fromBuffer로 매번 새로 만든다.
+      // → Assets 캐시를 타지 않으므로 참조카운트 대상이 아니다(texKey 미설정). AnimatedGIF.destroy()가
+      //   내부적으로 항상 stop()+텍스처(textureSource 포함) 해제를 수행하므로 removeItem의 기본 node.destroy()만으로 충분하다.
       const buf = await (await fetch(img.src)).arrayBuffer()
       sprite = AnimatedGIF.fromBuffer(buf)
     } else {
       // 보드 뷰는 medium(다중해상도)을 우선 로드 — 없으면 원본 src 폴백(편집 보드·하위호환).
       // 원본 풀해상도는 뷰어 라이트박스가 srcs.orig로 따로 띄운다(scene은 medium까지만).
-      const texture: Texture = await Assets.load(img.srcs?.medium ?? img.src)
+      texKey = imageCacheKey(img)
+      const texture: Texture = await Assets.load(texKey)
       sprite = new Sprite(texture)
     }
     sprite.anchor.set(0.5) // 중심 기준 배치/스케일/회전
@@ -176,7 +231,12 @@ export class Scene {
     this.world.addChild(sprite)
     // 고유 박스(natural)=크롭 반영 표시 픽셀. corners()/AABB가 이를 기준으로 계산해
     // 종전 texture.width 기반 경계와 수학적으로 동일하다(회귀 0).
-    this.registerNode(img.id, sprite, croppedSize(img.crop, img.natural), img.transform.scale)
+    this.registerNode(img.id, sprite, croppedSize(img.crop, img.natural), img.transform.scale, texKey)
+    // 참조카운트 +1(TEX-LEAK, 검수 보강). registerNode 직후(this.nodes에 등록 완료 후)에 retain해야,
+    // 그 사이(anchor/스케일모드/wireNode/transform/addChild)에서 예외가 나도 "등록 안 된 노드의 텍스처만
+    // retain된 채 남는" 불균형이 생기지 않는다 — removeItem은 this.nodes에 있는 노드만 release하므로,
+    // registerNode 실패 전에 retain해버리면 그 카운트를 영원히 못 내리는 텍스처 누수가 된다.
+    if (texKey) this.texRefs.retain(texKey)
     if (img.crop) this.applyCrop(img.id, img) // 저장본/복원 시 크롭 반영
     if (img.grayscale) this.applyGrayscale(sprite, true) // 저장된 흑백 플래그 반영
     return sprite
@@ -417,6 +477,10 @@ export class Scene {
   // 보드 전체를 비우고 새 items로 다시 그림(저장본 열기·Undo 복원용). 이미지/노트/드로잉 혼재 지원.
   async rebuild(items: BoardItem[]) {
     for (const id of [...this.nodes.keys()]) this.removeItem(id)
+    // 위 루프가 참조카운트 0으로 떨어뜨린 키들의 Assets.unload가 끝나길 기다린다. 안 그러면 바로 아래
+    // addItem 루프가 같은 key(srcs.medium)를 곧바로 Assets.load해 "언로드 중인 캐시를 다시 로드"하는
+    // 레이스가 생길 수 있다(보드 전체 재구성/Undo-Redo에서 같은 이미지가 그대로 남아있는 흔한 경로).
+    if (this.pendingTexUnloads.size > 0) await Promise.allSettled([...this.pendingTexUnloads])
     // 병렬 디코드 — 순차 await는 열기·Undo·Redo에서 전체 재디코드가 직렬이라 대량 보드에서 느리다(perf P2).
     // z 순서는 node.zIndex(applyNodeTransform) + world.sortableChildren이 보장하므로 추가 순서는 무관하다.
     const results = await Promise.allSettled(
@@ -436,8 +500,8 @@ export class Scene {
   }
 
   // ---- 노드 맵 관리(내부) ----
-  private registerNode(id: string, node: ItemNode, natural: { w: number; h: number }, scale: number) {
-    this.nodes.set(id, { node, natural, scale })
+  private registerNode(id: string, node: ItemNode, natural: { w: number; h: number }, scale: number, texKey?: string) {
+    this.nodes.set(id, { node, natural, scale, texKey })
   }
   private setNodeNatural(id: string, natural: { w: number; h: number }) {
     const m = this.nodes.get(id)
@@ -477,9 +541,25 @@ export class Scene {
   removeItem(id: string): boolean {
     const m = this.nodes.get(id)
     if (!m) return false
+    // 캐시 이미지(비GIF)면 참조카운트를 먼저 내린다 — 마지막 참조일 때만 Assets.unload로 실제 해제.
+    // node.destroy()는 기본 texture:false라 어차피 텍스처를 건드리지 않으므로 순서 무관하지만,
+    // "해제 책임은 참조카운트가 진다"는 걸 코드 순서로도 드러내기 위해 destroy 이전에 처리한다.
+    if (m.texKey) this.releaseTexture(m.texKey)
     m.node.destroy()
     this.nodes.delete(id)
     return true
+  }
+
+  // texKey의 참조카운트를 1 내리고, 0이 되면 실제로 Assets.unload한다(TEX-LEAK 수정 핵심).
+  // Assets.unload는 비동기라 fire-and-forget하되, 실패는 콘솔 경고로만 남기고(삭제 자체를 막지 않음)
+  // rebuild()가 재로드 전에 기다릴 수 있도록 pendingTexUnloads에 추적해둔다.
+  private releaseTexture(key: string): void {
+    if (!this.texRefs.release(key)) return
+    const p = Assets.unload(key).catch((err) => {
+      console.warn('[scene] 텍스처 캐시 해제 실패(무시):', key, err)
+    })
+    this.pendingTexUnloads.add(p)
+    void p.finally(() => this.pendingTexUnloads.delete(p))
   }
 
   // 하위호환 별칭 — 기존 호출부(main.ts removeImage)가 그대로 동작하도록 유지. 내부는 removeItem.
