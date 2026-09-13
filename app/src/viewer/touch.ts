@@ -7,6 +7,10 @@
 // - 활성 포인터를 Map으로 추적: 1개=팬, 2개=핀치(중심점 기준 배율 factor).
 // - 좌표는 항상 el 기준 로컬 좌표(clientX - rect.left)로 환산해 콜백에 넘긴다.
 // - factor는 "직전 프레임 대비 두 포인터 거리 비율"(증분). 누적 줌은 통합 측 책임.
+// - onLongPress: 댓글 발견 가능성 개선(모바일)을 위해 추가 — 판정 자체는 long-press.ts의 순수
+//   isLongPress()가 하고, 여기선 그 판정을 "실제 눌려 있는 동안" 평가할 setTimeout만 배선한다.
+
+import { isLongPress, LONG_PRESS_MS } from './long-press'
 
 export interface TouchGestureHandlers {
   // 1손가락 드래그: 직전 move 대비 화면 이동량(px).
@@ -15,6 +19,9 @@ export interface TouchGestureHandlers {
   onPinch: (factor: number, centerX: number, centerY: number) => void
   // 짧은 탭(드래그·핀치 없이 떼면): 탭 위치(el 로컬 px). 라이트박스 토글 등에 사용.
   onTap?: (x: number, y: number) => void
+  // 길게 누르기(≈400ms, 거의 안 움직였을 때): 발동 위치(el 로컬 px). 발동하면 이번 제스처의
+  // onTap은 억제된다(같은 놓기 동작이 탭+롱프레스로 이중 발동하지 않게).
+  onLongPress?: (x: number, y: number) => void
 }
 
 // 활성 포인터 1건의 최신 위치(el 로컬 좌표).
@@ -50,6 +57,11 @@ export function attachTouchGestures(el: HTMLElement, handlers: TouchGestureHandl
   let multiTouched = false
   // 직전 핀치가 끝난(2→1 또는 2→0으로 떨어진) 시각. 쿨다운 내 탭은 무시(핀치 잔여 탭 오인 방지).
   let lastPinchEndTime = 0
+
+  // 롱프레스 타이머(단일 포인터일 때만 가동). 포인터가 놓이면 무조건 해제(늦게 발동해
+  // 다음 제스처를 오염시키는 것을 막는다 — 판정은 발동 시점에 최신 상태로 재평가한다).
+  let longPressTimer: ReturnType<typeof setTimeout> | null = null
+  let longPressFired = false // 발동했으면 이번 제스처의 탭은 억제한다.
 
   // clientX/Y → el 로컬 좌표로 환산. 매 이벤트마다 rect를 읽어 스크롤/리사이즈에 안전.
   const toLocal = (e: PointerEvent): PointerState => {
@@ -89,11 +101,35 @@ export function attachTouchGestures(el: HTMLElement, handlers: TouchGestureHandl
       tapStartTime = performance.now()
       tapMoved = 0
       multiTouched = false
+      longPressFired = false
+      armLongPress()
     } else if (pointers.size === 2) {
       // 두 번째 포인터: 핀치 모드 진입. 기준 거리 세팅.
       multiTouched = true
       const g = pinchGeometry()
       lastPinchDist = g ? g.dist : null
+      clearLongPress() // 핀치로 전환되면 롱프레스 후보 탈락(핀치 시작 시점에 즉시 정리).
+    }
+  }
+
+  // 롱프레스 타이머를 (재)가동한다. onLongPress 핸들러가 없으면 아무 것도 하지 않는다(오버헤드 회피).
+  const armLongPress = (): void => {
+    clearLongPress()
+    if (!handlers.onLongPress) return
+    longPressTimer = setTimeout(() => {
+      longPressTimer = null
+      // 타이머 발동 시점의 최신 상태로 재평가(그 사이 이동/핀치가 있었을 수 있음).
+      if (isLongPress(performance.now() - tapStartTime, tapMoved, multiTouched)) {
+        longPressFired = true
+        handlers.onLongPress?.(tapStartX, tapStartY)
+      }
+    }, LONG_PRESS_MS)
+  }
+
+  const clearLongPress = (): void => {
+    if (longPressTimer != null) {
+      clearTimeout(longPressTimer)
+      longPressTimer = null
     }
   }
 
@@ -133,6 +169,8 @@ export function attachTouchGestures(el: HTMLElement, handlers: TouchGestureHandl
     } catch {
       // 이미 해제됨 — 무시.
     }
+    // 포인터가 놓였으니 롱프레스 타이머는 무조건 해제(늦게 발동해 다음 제스처를 오염시키지 않게).
+    clearLongPress()
 
     if (pointers.size < 2) {
       // 핀치 종료(또는 애초에 핀치 아님): 기준 거리 리셋.
@@ -149,7 +187,14 @@ export function attachTouchGestures(el: HTMLElement, handlers: TouchGestureHandl
       // 직전 핀치 종료로부터 쿨다운이 지나지 않았으면 탭 아님(빠른 핀치 해제의 손가락 떼는 순서
       // 역전으로 생기는 오개방 방지). multiTouched(이번 제스처 중 2손가락 관측)와 함께 이중 방어.
       const afterPinch = now - lastPinchEndTime < PINCH_TAP_COOLDOWN_MS
-      if (!multiTouched && !afterPinch && tapMoved <= TAP_MAX_MOVE && elapsed <= TAP_MAX_MS) {
+      // longPressFired면 이미 롱프레스로 처리됐으므로 탭(라이트박스 등)을 중복 발동하지 않는다.
+      if (
+        !multiTouched &&
+        !afterPinch &&
+        !longPressFired &&
+        tapMoved <= TAP_MAX_MOVE &&
+        elapsed <= TAP_MAX_MS
+      ) {
         handlers.onTap?.(tapStartX, tapStartY)
       }
     }
@@ -176,5 +221,6 @@ export function attachTouchGestures(el: HTMLElement, handlers: TouchGestureHandl
     el.style.touchAction = prevTouchAction
     pointers.clear()
     lastPinchDist = null
+    clearLongPress()
   }
 }

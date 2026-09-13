@@ -10,6 +10,7 @@ import { attachTouchGestures } from './touch'
 import { registerServiceWorker } from './pwa'
 import { getShareAdapter } from '../core/supabase-share'
 import { ZOOM_MAX, ZOOM_MIN } from '../core/constants'
+import { buildA11yImageLabel, buildCommentBadgeAnchors, hasComment, type CommentBadgeAnchor } from './comment-utils'
 
 const host = document.getElementById('app') as HTMLElement
 
@@ -42,6 +43,7 @@ const scene = await Scene.create(host)
 const cam = { x: 0, y: 0, zoom: 1 }
 function applyCam(): void {
   scene.setCamera(cam.x, cam.y, cam.zoom)
+  repositionCommentBadges() // 카메라가 움직이면 댓글 배지(DOM 오버레이)도 같이 따라와야 한다.
 }
 function clampZoom(z: number): number {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z))
@@ -92,7 +94,12 @@ function openLightboxAt(id: string): void {
   const list = [...board.items]
     .filter(isImageItem)
     .sort((a, b) => a.z - b.z)
-    .map((it) => ({ id: it.id, src: it.srcs?.orig ?? it.src }))
+    .map((it) => ({
+      id: it.id,
+      src: it.srcs?.orig ?? it.src,
+      // 라이트박스 안에서도 댓글을 읽을 수 있게(모바일에서 호버 툴팁이 없던 결함 보완).
+      comment: hasComment(it) ? it.comment : undefined,
+    }))
   const idx = list.findIndex((x) => x.id === id)
   if (idx >= 0) openLightbox(list, idx)
 }
@@ -111,7 +118,9 @@ function buildA11yImageList(b: BoardState): HTMLElement {
   ordered.forEach((it, i) => {
     const btn = document.createElement('button')
     btn.type = 'button'
-    btn.textContent = `이미지 ${i + 1} 크게 보기 (총 ${ordered.length}개)`
+    // 댓글이 있으면 라벨에 함께 담아, 스크린리더 사용자도 목록만으로 댓글 유무·내용을 알 수 있게 한다
+    // (터치 사용자와 동일했던 "댓글 발견 불가" 결함이 비시각 사용자에게도 있었다).
+    btn.textContent = buildA11yImageLabel(i, ordered.length, hasComment(it) ? (it.comment ?? null) : null)
     btn.addEventListener('click', () => openLightboxAt(it.id))
     nav.appendChild(btn)
   })
@@ -154,6 +163,12 @@ attachTouchGestures(host, {
     const id = hitTest(x, y)
     if (id) openLightboxAt(id)
   },
+  // 롱프레스(≈400ms): 터치에는 호버가 없어 댓글이 안 보이던 결함 보완(배지 탭과 동일한 시트를 연다).
+  // 발동하면 touch.ts가 onTap을 억제하므로 라이트박스가 동시에 열리지 않는다.
+  onLongPress: (x, y) => {
+    const it = hitTestItem(x, y, hasComment)
+    if (it && hasComment(it)) showCommentSheet(it.comment ?? '')
+  },
 })
 host.addEventListener('contextmenu', (e) => e.preventDefault())
 window.addEventListener('resize', () => fitAll())
@@ -186,8 +201,8 @@ document.body.appendChild(commentTip)
 
 // 화면 좌표에 위치한 "댓글 있는 이미지"의 comment를 반환(없으면 null).
 function commentAt(sx: number, sy: number): string | null {
-  const it = hitTestItem(sx, sy, (i) => isImageItem(i) && !!i.comment && i.comment.trim().length > 0)
-  return it && isImageItem(it) ? (it.comment ?? null) : null
+  const it = hitTestItem(sx, sy, hasComment)
+  return it && hasComment(it) ? (it.comment ?? null) : null
 }
 
 // 댓글 툴팁을 커서 근처에 표시한다(화면 밖으로 넘치지 않게 가장자리에서 반대편으로 뒤집음).
@@ -210,7 +225,7 @@ function hideCommentTip(): void {
   if (commentTip.style.display !== 'none') commentTip.style.display = 'none'
 }
 
-// 마우스 이동 시에만 갱신(터치는 탭→라이트박스라 호버 개념이 약해 생략).
+// 마우스 이동 시에만 갱신(터치는 탭→라이트박스가 우선이라 호버 대신 배지/롱프레스로 대체한다 — 아래).
 host.addEventListener('mousemove', (e) => {
   const rect = host.getBoundingClientRect()
   const text = commentAt(e.clientX - rect.left, e.clientY - rect.top)
@@ -221,11 +236,165 @@ host.addEventListener('mousemove', (e) => {
 host.addEventListener('mouseleave', hideCommentTip)
 host.addEventListener('wheel', hideCommentTip, { passive: true })
 
+// ---- 댓글 배지(데스크탑·모바일 공통 발견 가능성) ----
+// 호버 툴팁(위)은 마우스 전용이라 터치 기기에서는 댓글의 존재 자체를 알 방법이 없었다(감사 지적).
+// 댓글이 있는 이미지 우상단에 작은 말풍선 배지를 항상 그려 두 플랫폼 모두에서 발견 가능하게 한다.
+// 캔버스는 PixiJS 단일 레이어라 아이템별 DOM이 없으므로, 배지는 아이템의 월드 AABB를 화면 좌표로
+// 투영해 만든 별도 DOM 오버레이다 — 카메라(cam)가 바뀔 때마다 repositionCommentBadges()로 따라간다.
+const badgeLayer = document.createElement('div')
+// 레이어 자체는 클릭을 통과시키고(캔버스 팬/탭을 가리지 않게), 배지 각각만 pointer-events:auto.
+badgeLayer.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:55'
+document.body.appendChild(badgeLayer)
+
+let badgeAnchors: CommentBadgeAnchor[] = []
+const badgeEls = new Map<string, HTMLButtonElement>()
+
+// 월드 좌표 → 화면(뷰포트) 좌표. scene.screenToWorld의 역변환(둘 다 cam 기준 동일 아핀 변환 공유).
+function worldToScreen(wx: number, wy: number): { x: number; y: number } {
+  return { x: wx * cam.zoom + cam.x, y: wy * cam.zoom + cam.y }
+}
+
+// 말풍선 아이콘 — 플랫폼별 이모지 렌더 차이를 피하려 인라인 SVG로 그린다.
+const COMMENT_BADGE_ICON =
+  '<svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path ' +
+  'd="M4 4h16v12H8l-4 4V4z" fill="currentColor"/></svg>'
+
+function makeCommentBadgeEl(anchor: CommentBadgeAnchor): HTMLButtonElement {
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  // 스크린리더는 배지만으로도 어떤 댓글인지 바로 알 수 있어야 한다(a11y).
+  btn.setAttribute('aria-label', `댓글 보기: ${anchor.comment}`)
+  btn.innerHTML = COMMENT_BADGE_ICON
+  btn.style.cssText = [
+    'position:fixed',
+    'width:22px',
+    'height:22px',
+    'transform:translate(-50%,-50%)', // 앵커(AABB 우상단)를 배지 중심으로.
+    'display:flex',
+    'align-items:center',
+    'justify-content:center',
+    'border-radius:50%',
+    'border:1px solid var(--rb-panel-border, #3a3a3a)',
+    'background:var(--rb-accent, #3a7afe)',
+    'color:var(--rb-accent-fg, #fff)',
+    'cursor:pointer',
+    'pointer-events:auto', // 레이어는 통과, 배지 자체는 클릭 가능.
+    'box-shadow:0 2px 6px rgba(0,0,0,.35)',
+  ].join(';')
+  // 배지는 host(캔버스) 밖의 document.body 자식이라 클릭이 host로 버블링되지 않는다 —
+  // 라이트박스(탭) 핸들러와 자연히 충돌하지 않는다(별도 stopPropagation 불필요).
+  btn.addEventListener('click', () => showCommentSheet(anchor.comment))
+  return btn
+}
+
+// 보드 로드/재빌드 시 댓글 있는 이미지 목록으로 배지를 다시 만든다.
+function rebuildCommentBadges(b: BoardState): void {
+  badgeLayer.innerHTML = ''
+  badgeEls.clear()
+  badgeAnchors = buildCommentBadgeAnchors(b.items, (id) => scene.getItemAABB(id))
+  for (const a of badgeAnchors) {
+    const el = makeCommentBadgeEl(a)
+    badgeEls.set(a.id, el)
+    badgeLayer.appendChild(el)
+  }
+  repositionCommentBadges()
+}
+
+// 카메라(팬/줌)가 바뀔 때마다 배지 화면 위치를 다시 계산한다(applyCam에서 호출).
+function repositionCommentBadges(): void {
+  for (const a of badgeAnchors) {
+    const el = badgeEls.get(a.id)
+    if (!el) continue
+    const s = worldToScreen(a.worldX, a.worldY)
+    el.style.left = `${s.x}px`
+    el.style.top = `${s.y}px`
+  }
+}
+
+// ---- 댓글 시트(모바일: 배지 탭 · 롱프레스 공용 표시) ----
+// 위치 계산이 필요한 툴팁과 달리 화면 하단에 고정되는 바텀시트라 터치 지점과 무관하게 항상 안전하다.
+const commentSheetBackdrop = document.createElement('div')
+// 시트가 열려 있는 동안만 전체 화면 탭을 가로채 "바깥 탭으로 닫기"를 구현한다.
+commentSheetBackdrop.style.cssText = 'position:fixed;inset:0;z-index:70;display:none'
+commentSheetBackdrop.addEventListener('click', hideCommentSheet)
+
+const commentSheet = document.createElement('div')
+commentSheet.setAttribute('role', 'region')
+commentSheet.setAttribute('aria-label', '이미지 댓글')
+commentSheet.setAttribute('aria-live', 'polite') // 열리는 순간 스크린리더가 내용을 읽도록.
+commentSheet.style.cssText = [
+  'position:fixed',
+  'left:0',
+  'right:0',
+  'bottom:0',
+  'z-index:71',
+  'display:none',
+  'box-sizing:border-box',
+  'max-height:40vh',
+  'overflow-y:auto',
+  'padding:16px 44px 16px 18px',
+  'padding-bottom:calc(16px + env(safe-area-inset-bottom, 0px))', // 노치 기기 하단 안전영역.
+  'border-radius:16px 16px 0 0',
+  'font:14px/1.6 system-ui,Segoe UI,sans-serif',
+  'white-space:pre-wrap',
+  'word-break:break-word',
+  'background:var(--rb-panel-bg, #252526)',
+  'color:var(--rb-text, #e6e6e6)',
+  'border-top:1px solid var(--rb-panel-border, #3a3a3a)',
+  'box-shadow:0 -8px 28px rgba(0,0,0,.4)',
+].join(';')
+commentSheet.addEventListener('click', (e) => e.stopPropagation()) // 내용 클릭이 백드롭 닫기로 새지 않게.
+
+const commentSheetClose = document.createElement('button')
+commentSheetClose.type = 'button'
+commentSheetClose.setAttribute('aria-label', '댓글 닫기')
+commentSheetClose.textContent = '✕'
+commentSheetClose.style.cssText = [
+  'position:absolute',
+  'top:10px',
+  'right:10px',
+  'width:32px',
+  'height:32px',
+  'display:flex',
+  'align-items:center',
+  'justify-content:center',
+  'border:none',
+  'border-radius:50%',
+  'cursor:pointer',
+  'font-size:15px',
+  'line-height:1',
+  'background:transparent',
+  'color:var(--rb-text-dim, #999)',
+].join(';')
+commentSheetClose.addEventListener('click', hideCommentSheet)
+
+const commentSheetText = document.createElement('div')
+commentSheet.appendChild(commentSheetClose)
+commentSheet.appendChild(commentSheetText)
+document.body.appendChild(commentSheetBackdrop)
+document.body.appendChild(commentSheet)
+
+function showCommentSheet(text: string): void {
+  commentSheetText.textContent = text
+  commentSheetBackdrop.style.display = 'block'
+  commentSheet.style.display = 'block'
+}
+function hideCommentSheet(): void {
+  commentSheetBackdrop.style.display = 'none'
+  commentSheet.style.display = 'none'
+}
+// Esc로도 닫을 수 있게(키보드 사용자 — 배지는 버튼이라 포커스 가능, 시트는 배경 탭만으론 부족).
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') hideCommentSheet()
+})
+
 // 보드를 화면에 렌더(임베드/해시 공통 경로).
 async function renderBoard(b: BoardState): Promise<void> {
   board = b
   await scene.rebuild(b.items)
   fitAll()
+  // 댓글 배지: AABB가 확정된 뒤(rebuild 이후) 계산해야 위치가 맞는다.
+  rebuildCommentBadges(b)
   // 보드 메타(제목/이미지 수) 좌상단.
   const meta = renderBoardMeta({
     title: b.board.title || 'RefBoard',

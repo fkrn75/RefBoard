@@ -20,6 +20,8 @@ export interface LightboxItem {
   id: string
   src: string // data URL 또는 링크(파일/웹 경로)
   title?: string // 캡션에 쓰는 제목(없으면 순번만 표시)
+  comment?: string // 이미지에 부착된 댓글(BoardImage.comment) — 있으면 캡션 위에 패널로 보여준다.
+  // 모바일에서 댓글이 툴팁 호버로 안 보이던 결함(감사 지적) 보완 — 라이트박스 안에서도 읽을 수 있게.
 }
 
 // ---- 모듈 상태(싱글턴 오버레이) ----
@@ -27,6 +29,7 @@ export interface LightboxItem {
 let root: HTMLDivElement | null = null // 백드롭(가장 바깥)
 let imgEl: HTMLImageElement | null = null // 현재 표시 중인 이미지
 let captionEl: HTMLDivElement | null = null // 하단 캡션(제목 + 순번)
+let commentEl: HTMLDivElement | null = null // 댓글 패널(캡션 위) — 댓글 없으면 숨김
 let prevBtn: HTMLButtonElement | null = null
 let nextBtn: HTMLButtonElement | null = null
 let closeBtn: HTMLButtonElement | null = null // 닫기 버튼(포커스 트랩·초기 포커스 대상 — a11y P1)
@@ -92,6 +95,7 @@ export function closeLightbox(): void {
   root = null
   imgEl = null
   captionEl = null
+  commentEl = null
   prevBtn = null
   nextBtn = null
   closeBtn = null
@@ -230,10 +234,40 @@ function buildDom(): void {
     'pointer-events:none', // 캡션이 빈영역 클릭(닫기)을 가로채지 않게.
   ].join(';')
 
+  // 댓글 패널(캡션 위): BoardImage.comment가 있는 항목만 표시(show()에서 토글).
+  // 모바일에서 호버 툴팁이 아예 안 보이던 결함 보완 — 라이트박스는 풀스크린이라 항상 접근 가능하다.
+  const comment = document.createElement('div')
+  comment.setAttribute('role', 'note')
+  comment.setAttribute('aria-label', '이미지 댓글')
+  comment.style.cssText = [
+    'position:absolute',
+    'left:50%',
+    'bottom:64px', // 캡션(20px) 위에 쌓이게
+    'transform:translateX(-50%)',
+    'max-width:min(480px,80vw)',
+    'max-height:22vh',
+    'overflow-y:auto',
+    'padding:10px 14px',
+    'border-radius:10px',
+    'text-align:left',
+    'font-size:13px',
+    'line-height:1.5',
+    'white-space:pre-wrap',
+    'word-break:break-word',
+    'background:var(--rb-panel-bg, rgba(40,40,40,.7))',
+    'color:var(--rb-text, #e6e6e6)',
+    'border:1px solid var(--rb-panel-border, #3a3a3a)',
+    '-webkit-backdrop-filter:blur(8px)',
+    'backdrop-filter:blur(8px)',
+    'pointer-events:none', // 캡션과 동일 — 빈영역 클릭(닫기)을 가로채지 않게.
+    'display:none', // 댓글 없는 항목이 기본값이라 숨김 시작.
+  ].join(';')
+
   backdrop.appendChild(img)
   backdrop.appendChild(prev)
   backdrop.appendChild(next)
   backdrop.appendChild(close)
+  backdrop.appendChild(comment)
   backdrop.appendChild(caption)
   document.body.appendChild(backdrop)
   detachTouchGestures = attachTouchGestures(backdrop, {
@@ -254,6 +288,7 @@ function buildDom(): void {
   root = backdrop
   imgEl = img
   captionEl = caption
+  commentEl = comment
   prevBtn = prev
   nextBtn = next
   closeBtn = close
@@ -303,7 +338,21 @@ function show(i: number): void {
   imgEl.alt = item.title ? item.title : `이미지 ${i + 1} / ${items.length}`
   resetZoom() // 항목이 바뀌면 줌을 맞춤 상태로 되돌린다.
   updateCaption()
+  updateComment()
   updateNavButtons()
+}
+
+// 댓글 패널 갱신: 댓글이 있으면 텍스트를 채워 보이고, 없으면 숨긴다.
+function updateComment(): void {
+  if (!commentEl) return
+  const text = items[index]?.comment
+  if (text && text.trim().length > 0) {
+    commentEl.textContent = text
+    commentEl.style.display = 'block'
+  } else {
+    commentEl.textContent = ''
+    commentEl.style.display = 'none'
+  }
 }
 
 // 캡션 텍스트 갱신: 제목이 있으면 "제목 · n/총", 없으면 "n/총".
