@@ -15,21 +15,15 @@ import { serialize, deserialize, type BoardState } from './board'
 const RECENT_KEY = 'refboard.recent' // 최근 파일 목록(JSON 배열)
 const LAST_SESSION_KEY = 'refboard.lastSession' // 마지막 세션 보드(serialize 문자열)
 
-// 최근 목록 기본 최대 개수. setMaxRecent로 변경 가능.
+// 최근 목록 기본 최대 개수. 외부에서 바꿀 수단은 없다(DEAD-EXPORT로 setMaxRecent 제거).
 const DEFAULT_MAX_RECENT = 10
-let maxRecent = DEFAULT_MAX_RECENT
+const maxRecent = DEFAULT_MAX_RECENT
 
 // 최근 파일 1건. name을 식별자로 삼아(같은 이름=같은 항목) 중복을 제거한다.
 export interface RecentEntry {
   name: string // 파일명(.refb). 목록 내 고유 식별자 역할
   ts: number // 마지막 열기/저장 시각(epoch ms) — 최신순 정렬·"n분 전" 표기용
   size?: number // 파일 크기(byte, 선택) — 목록에 부가 표기용
-}
-
-// 최근 목록 최대 개수를 변경한다(양의 정수만 허용, 그 외는 무시).
-// 이미 저장된 목록은 다음 addRecent 시 새 한도로 잘린다.
-export function setMaxRecent(n: number): void {
-  if (typeof n === 'number' && Number.isInteger(n) && n > 0) maxRecent = n
 }
 
 // 현재 최근 목록 최대 개수.

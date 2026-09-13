@@ -209,6 +209,10 @@ function isBoardState(value: unknown): value is BoardState {
   if (!isFiniteNumber(value.camera.x) || !isFiniteNumber(value.camera.y) || !isFiniteNumber(value.camera.zoom)) {
     return false
   }
+  // zoom은 0 이하(0·음수)면 화면이 붕괴되므로 거부한다(ZOOM-01).
+  // 상한(ZOOM_MAX)은 여기서 거부하지 않고 main.ts restore()가 표시 직전 클램프한다 —
+  // 범위를 살짝 넘는 저장본을 통째로 열기 실패시키는 것보다 사용자에게 유리하다.
+  if (value.camera.zoom <= 0) return false
   return Array.isArray(value.items) && value.items.every(isBoardItemValue)
 }
 

@@ -121,4 +121,24 @@ describe('deserialize', () => {
       deserialize(JSON.stringify({ ...mixedBoard, items: [{ ...mixedBoard.items[0], opacity: '1' }] })),
     ).toThrow('유효한 RefBoard 보드 데이터가 아닙니다.')
   })
+
+  it('rejects zero, negative, NaN, or non-numeric camera zoom (ZOOM-01)', () => {
+    expect(() =>
+      deserialize(JSON.stringify({ ...mixedBoard, camera: { x: 0, y: 0, zoom: 0 } })),
+    ).toThrow('유효한 RefBoard 보드 데이터가 아닙니다.')
+    expect(() =>
+      deserialize(JSON.stringify({ ...mixedBoard, camera: { x: 0, y: 0, zoom: -1.5 } })),
+    ).toThrow('유효한 RefBoard 보드 데이터가 아닙니다.')
+    expect(() =>
+      deserialize(JSON.stringify({ ...mixedBoard, camera: { x: 0, y: 0, zoom: Number.NaN } })),
+    ).toThrow('유효한 RefBoard 보드 데이터가 아닙니다.')
+    expect(() =>
+      deserialize(JSON.stringify({ ...mixedBoard, camera: { x: 0, y: 0, zoom: '1' } })),
+    ).toThrow('유효한 RefBoard 보드 데이터가 아닙니다.')
+    // 상한(ZOOM_MAX) 초과는 파서가 거부하지 않는다 — main.ts restore()에서 클램프하는 몫이다.
+    expect(parseBoardState({ ...mixedBoard, camera: { x: 0, y: 0, zoom: 999 } })).toEqual({
+      ...mixedBoard,
+      camera: { x: 0, y: 0, zoom: 999 },
+    })
+  })
 })

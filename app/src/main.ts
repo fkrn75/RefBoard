@@ -632,6 +632,8 @@ async function restore(state: BoardState, opts?: { keepCamera?: boolean }) {
   board = state
   await scene.rebuild(board.items)
   cam = keep ?? { ...board.camera }
+  // 파서는 zoom > 0만 보장하므로(ZOOM-01), 표시 직전 유효 범위로 클램프한다.
+  cam.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom))
   applyCam()
   sel.clear()
   hint.style.display = board.items.length > 0 ? 'none' : ''
@@ -741,17 +743,25 @@ async function duplicateSelected() {
   const ids = sel.values()
   if (ids.length === 0) return
   commit()
-  const newIds: string[] = []
+  // 먼저 소스를 전부 수집해 복사본을 만든 뒤 한꺼번에 push한다(DUP-PERF).
+  // 루프 중간에 board.items.push를 섞으면 매 반복마다 board.items.length가 바뀌어
+  // getItem()의 itemIndex 캐시가 매번 재구축돼(O(n) × n회 = O(n²)) 느려진다.
+  let nextZ = board.items.length
+  const copies: BoardItem[] = []
   for (const id of ids) {
     const src = getItem(id)
     if (!src) continue
     // 타입 무관 깊은 복사(이미지/노트/드로잉). id·z·위치만 새로 부여.
     const copy = structuredClone(src) as BoardItem
     copy.id = genId()
-    copy.z = board.items.length
+    copy.z = nextZ++
     copy.transform.x += 24
     copy.transform.y += 24
-    board.items.push(copy)
+    copies.push(copy)
+  }
+  board.items.push(...copies)
+  const newIds: string[] = []
+  for (const copy of copies) {
     await scene.addItem(copy) // 타입에 맞게 sprite/text/graphics 추가
     newIds.push(copy.id)
   }

@@ -17,10 +17,11 @@
 //   - undo/redo는 "현재 상태"(current)를 인자로 받아 반대편 스택에 보존한다.
 //     이렇게 해야 undo→redo 왕복이 정확히 복원된다.
 //
-// 비용 주의 (structuredClone):
-//   스냅샷은 structuredClone으로 깊은 복제한다. BoardImage.src 가 임베드(data URL)면
-//   그 base64 문자열까지 통째로 복제되므로, 임베드 용량이 크면 스냅샷 1개 메모리가 클 수 있다.
-//   상한(LIMIT)으로 누적 개수를 제한해 메모리 폭주를 막는다.
+// 비용 주의 (cloneBoardForHistory):
+//   스냅샷은 structuredClone이 아니라 cloneBoardForHistory(아래)의 수동 얕은 복제다.
+//   camera·board 메타·아이템 배열/객체는 새로 만들지만, BoardImage.src·srcs 같은 문자열 값은
+//   참조를 그대로 공유한다(문자열은 불변이라 공유해도 안전 + base64 재복제를 피해 더 저렴).
+//   그래도 스냅샷 개수가 쌓이면 메모리가 늘 수 있어, 상한(LIMIT)으로 누적 개수를 제한한다.
 
 import type { BoardDrawing, BoardImage, BoardItem, BoardNote, BoardState, Crop, ImageSrcSet, Transform } from './board'
 

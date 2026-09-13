@@ -96,7 +96,8 @@ function mainKeyOf(e: KeyboardEvent): string {
 
 // combo 문자열을 정규화한다('shift+ctrl+p' → 'Ctrl+Shift+P').
 // 빈/공백 문자열은 빈 문자열(바인딩 없음)로 본다.
-export function parseCombo(str: string): string {
+// 모듈 내부(registerActions/rebind/loadBindings)에서만 쓰여 export는 제거(DEAD-EXPORT).
+function parseCombo(str: string): string {
   if (!str) return ''
   const tokens = str
     .split('+')
@@ -149,11 +150,6 @@ export function registerActions(list: Action[]): void {
 // 등록된 액션 전체를 등록 순서대로 반환한다(팔레트·설정 UI 나열용).
 export function getActions(): Action[] {
   return [...actions.values()]
-}
-
-// 특정 id의 액션을 반환(없으면 undefined).
-export function getAction(id: string): Action | undefined {
-  return actions.get(id)
 }
 
 // ---- 바인딩 테이블(actionId → combo) ----
