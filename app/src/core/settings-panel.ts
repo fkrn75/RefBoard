@@ -34,6 +34,11 @@ import {
 import { MODAL_Z_INDEX } from './constants'
 import { createFocusTrap, type FocusTrap } from './modal'
 import { getRenderSettings, setPixelated } from './render-settings'
+import { isDesktop } from './tauri-bridge'
+
+// 사용 설명서 상대경로. index.html과 같은 루트(dist)에 번들되므로 웹·데스크탑 공통으로 쓴다.
+// (데스크탑에서 별도 셸 오픈 브릿지가 필요하면 tauri-bridge.ts에 추가 후 이 상수를 교체할 것 — 이 배치에서는 미도입)
+const MANUAL_URL = 'manual.html'
 
 // ---- 탭 식별자 ----
 export type SettingsTab = 'theme' | 'keys' | 'general'
@@ -715,6 +720,23 @@ function renderGeneralTab(host: HTMLDivElement): void {
   row.appendChild(cb)
   row.appendChild(textWrap)
   host.appendChild(row)
+
+  // --- 도움말 섹션 ---
+  const helpHeading = document.createElement('div')
+  helpHeading.textContent = '도움말'
+  helpHeading.style.cssText = ['font-size:11px', 'font-weight:600', 'color:var(--rb-text-dim, #777)', 'padding:18px 4px 8px', 'letter-spacing:.04em'].join(';')
+  host.appendChild(helpHeading)
+
+  const manualBtn = document.createElement('button')
+  manualBtn.type = 'button'
+  manualBtn.textContent = isDesktop() ? '사용 설명서 열기 (새 창)' : '사용 설명서 열기 (새 탭)'
+  manualBtn.style.cssText = secondaryButtonCss()
+  manualBtn.addEventListener('click', () => {
+    // Tauri 셸/오프너 브릿지가 없어 window.open으로 연다. 웹은 새 탭, 데스크탑은 Tauri가
+    // 새 webview 창으로 띄운다(별도 오프너 미도입 — 실제 데스크탑 동작은 수동 확인 필요).
+    window.open(MANUAL_URL, '_blank', 'noopener')
+  })
+  host.appendChild(manualBtn)
 }
 
 // ---- 공통 키 입력 처리(캡처 단계) ----
